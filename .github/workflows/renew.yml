@@ -78,11 +78,19 @@ jobs:
       env:
         USERS_JSON: ${{ secrets.USERS_JSON }}
         PROXY_URL: ${{ secrets.PROXY_URL }}
-        PROXY_SERVER: http://127.0.0.1:8080
-        IS_PROXY: "true"
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-      run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 app.py
+      run: |
+        # Route through sing-box only when it is actually up (PROXY_URL was set)
+        if [ -x ./sing-box ] && timeout 2 bash -c "</dev/tcp/127.0.0.1/8080" 2>/dev/null; then
+          export PROXY_SERVER=http://127.0.0.1:8080
+          export IS_PROXY=true
+          echo "Routing through sing-box proxy"
+        else
+          export IS_PROXY=false
+          echo "sing-box not running, direct connection"
+        fi
+        xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 app.py
 
     - name: Upload Screenshots
       if: always()
