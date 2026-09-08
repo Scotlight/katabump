@@ -266,15 +266,38 @@ _ALTCHA_CHECKPOINT_JS = """
     var modal = document.querySelector('div.modal.show') || document;
     var cb = modal.querySelector('input[id^="altcha_checkbox"]');
     if (!cb) return null;
+    // 滚动到视口，等它布局完成再量
+    try { cb.scrollIntoView({block:'center', inline:'center'}); } catch(e){}
     var r = cb.getBoundingClientRect();
-    if (!r || (r.width === 0 && r.height === 0)) {
+    // 折叠态(0尺寸)：向上打开容器的遮蔽 + overflow，再量一次
+    if (!r || (r.width < 2 && r.height < 2)) {
         var disp = cb;
-        for (var k=0; k<8; k++){ disp = disp.parentElement; if(!disp) break; disp.style.display=''; disp.style.visibility='visible'; disp.style.clip='auto'; disp.style.opacity='1'; disp.style.overflow='visible'; }
+        for (var k=0; k<12; k++){
+            disp = disp.parentElement;
+            if (!disp) break;
+            disp.style.display=''; disp.style.visibility='visible'; disp.style.clip='auto';
+            disp.style.opacity='1'; disp.style.overflow='visible';
+            disp.style.width=''; disp.style.height='';
+            if (disp.shadowRoot) disp.style.display='block';
+        }
+        if (cb.scrollIntoView){ try{ cb.scrollIntoView({block:'center'}); }catch(e){} }
         r = cb.getBoundingClientRect();
     }
+    // 仍 0 → 用祖先里可见的 checkbox 容器盒
+    if (!r || (r.width < 2 && r.height < 2)) {
+        var anc = cb;
+        for (var m=0; m<10; m++){
+            anc = anc.parentElement; if (!anc) break;
+            var rr = anc.getBoundingClientRect();
+            if (rr && rr.width > 2 && rr.height > 2) { r = rr; break; }
+        }
+    }
+    if (!r || r.width < 2) return null;
     return { cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2) };
 })()
-"""#  底层输入工具
+"""
+
+#  底层输入工具
 def js_fill_input(sb, selector: str, text: str):
     safe_text = text.replace('\\', '\\\\').replace('"', '\\"')
     sb.execute_script(f"""
@@ -915,9 +938,11 @@ def _solve_altcha(sb) -> bool:
     # 获取 AltCHA 复选框自身屏幕坐标（主策略：真实物理点击复选框，与实测一致）
     coords = None
     try:
-        coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS) or \
-                 sb.execute_script(_ALTCHA_EXPAND_JS)
+        coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS)
     except Exception:
+        coords = None
+    # 坐标无效(0,0)则退回旧的 iframe 坐标启发
+    if not coords or (coords.get('cx')==0 and coords.get('cy')==0):
         try:
             coords = sb.execute_script(_ALTCHA_EXPAND_JS)
         except Exception:
@@ -981,7 +1006,9 @@ def _solve_altcha(sb) -> bool:
         print(f"  ⚠️ 第 {attempt + 1} 轮未通过，重试...")
         # 重新获取坐标（widget 可能已重新渲染/展开）
         try:
-            new_coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS) or sb.execute_script(_ALTCHA_EXPAND_JS)
+            new_coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS)
+            if not new_coords or (new_coords.get('cx')==0 and new_coords.get('cy')==0):
+                new_coords = sb.execute_script(_ALTCHA_EXPAND_JS)
             if new_coords:
                 coords = new_coords
         except Exception:
