@@ -243,29 +243,38 @@ _ALTCHA_EXPAND_JS = """
 """
 
 # 检测 ALTCHA 是否已验证通过
-_ALTCHA_SOLVED_JS = """
-(function(){
+# [根因 09-08/09-09] 旧版把「任意 hidden input 值>20」「任意 checkbox disabled」「任意 data-state=verified」
+# 都当成已通过，导致自动化点击后第一轮就“假通过”——其实 widget 从未产出
+# 可提交的后端 token。实测（CDP 真实 click → POST body 带 altcha=eyJhbGc… JWT），
+# 成功续期的必要条件是：AltCHA widget 本体验证通过，即那个 `input#altcha_checkbox_* (I'm not a robot)`
+# 被 widget 置为 disabled（真实点击后才会）。
+_ALTCHA_SOLVED_JS = """(function(){
     var modal = document.querySelector('div.modal.show') || document;
-    // hidden input 有值
-    var inputs = modal.querySelectorAll('input[type="hidden"]');
-    for (var i = 0; i < inputs.length; i++) {
-        var n = (inputs[i].name || '').toLowerCase();
-        if ((n.includes('altcha') || n.includes('captcha')) &&
-            inputs[i].value && inputs[i].value.length > 20) return true;
-    }
-    // checkbox 变为 disabled
-    var cbs = modal.querySelectorAll('input[type="checkbox"]');
+    if (!modal) return false;
+    var cbs = modal.querySelectorAll('input[id^="altcha_checkbox"]');
     for (var j = 0; j < cbs.length; j++) {
         if (cbs[j].disabled) return true;
     }
-    // widget data-state 属性
-    var w = modal.querySelector('[data-state="verified"],.altcha--verified,.altcha-verified');
-    if (w) return true;
-    return false;
+    var wtest = modal.querySelector('altcha-widget[data-verify-state="verified"], altcha-widget[state="verified"], [data-state="verified"]');
+    return !!wtest;
 })()
 """
 
-#  底层输入工具
+# 返回 Alt 复选框的真实屏幕坐标（供在真机/无头里精准物理点击）
+_ALTCHA_CHECKPOINT_JS = """
+(function(){
+    var modal = document.querySelector('div.modal.show') || document;
+    var cb = modal.querySelector('input[id^="altcha_checkbox"]');
+    if (!cb) return null;
+    var r = cb.getBoundingClientRect();
+    if (!r || (r.width === 0 && r.height === 0)) {
+        var disp = cb;
+        for (var k=0; k<8; k++){ disp = disp.parentElement; if(!disp) break; disp.style.display=''; disp.style.visibility='visible'; disp.style.clip='auto'; disp.style.opacity='1'; disp.style.overflow='visible'; }
+        r = cb.getBoundingClientRect();
+    }
+    return { cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2) };
+})()
+"""#  底层输入工具
 def js_fill_input(sb, selector: str, text: str):
     safe_text = text.replace('\\', '\\\\').replace('"', '\\"')
     sb.execute_script(f"""
@@ -903,15 +912,19 @@ def _solve_altcha(sb) -> bool:
         print("✅ ALTCHA 已自动通过")
         return True
 
-    # 展开模态框内 iframe 并获取坐标
+    # 获取 AltCHA 复选框自身屏幕坐标（主策略：真实物理点击复选框，与实测一致）
     coords = None
     try:
-        coords = sb.execute_script(_ALTCHA_EXPAND_JS)
+        coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS) or \
+                 sb.execute_script(_ALTCHA_EXPAND_JS)
     except Exception:
-        pass
+        try:
+            coords = sb.execute_script(_ALTCHA_EXPAND_JS)
+        except Exception:
+            coords = None
 
     if coords:
-        print(f"  📍 找到模态框内 iframe 坐标: ({coords['cx']}, {coords['cy']})")
+        print(f"  📍 找到 ALTCHA 坐标: ({coords['cx']}, {coords['cy']})")
 
     # 最多尝试 3 轮
     for attempt in range(3):
@@ -919,7 +932,7 @@ def _solve_altcha(sb) -> bool:
             print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮）")
             return True
 
-        # 策略 1: xdotool 物理点击 iframe 坐标
+        # 策略 1: xdotool 物理点击复选框本身（真实用户手势，Cloudflare 才肯发 puzzle）
         if coords:
             try:
                 wi = sb.execute_script(_WININFO_JS)
@@ -931,38 +944,24 @@ def _solve_altcha(sb) -> bool:
             print(f"🖱️  ALTCHA点击复选框  ({ax}, {ay})")
             _xdotool_click(ax, ay)
 
-        # 策略 2: SeleniumBase 原生点击模态框内 iframe 元素
+        # 策略 2: SeleniumBase 原生点击复选框元素
         try:
-            iframes = sb.find_elements('div.modal.show iframe')
-            for iframe in iframes:
+            cbs = sb.find_elements('div.modal.show input[id^=altcha_checkbox], div.modal.show input[type=checkbox]')
+            for cb in cbs:
                 try:
-                    iframe.click()
-                    print("🖱️  SeleniumBase 点击模态框 iframe")
+                    cb.click()
+                    print("🖱️  SeleniumBase 点击复选框")
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # 策略 3: JS 遍历模态框内所有可点击元素
+        # 策略 3: JS 触发复选框真实 click 事件（带 bubbles，让 AltCHA widget 收）
         sb.execute_script("""
             (function(){
                 var modal = document.querySelector('div.modal.show');
                 if (!modal) return;
-                // 点击 iframe
-                var iframes = modal.querySelectorAll('iframe');
-                for (var i = 0; i < iframes.length; i++) {
-                    iframes[i].click();
-                    iframes[i].dispatchEvent(new MouseEvent('click', {bubbles:true}));
-                }
-                // 点击含 checkbox 的 label
-                var labels = modal.querySelectorAll('label');
-                for (var j = 0; j < labels.length; j++) {
-                    var txt = (labels[j].textContent || '').toLowerCase();
-                    if (txt.includes('robot') || txt.includes('captcha') || txt.includes('verify'))
-                        labels[j].click();
-                }
-                // 点击 checkbox
-                var cbs = modal.querySelectorAll('input[type="checkbox"]');
+                var cbs = modal.querySelectorAll('input[id^="altcha_checkbox"], input[type="checkbox"]');
                 for (var k = 0; k < cbs.length; k++) {
                     if (!cbs[k].disabled) {
                         cbs[k].click();
@@ -972,17 +971,17 @@ def _solve_altcha(sb) -> bool:
             })()
         """)
 
-        # 等待验证结果
-        for _ in range(6):
+        # 等待验证结果（AltCHA需几秒算题，最多 ~18s）
+        for _ in range(18):
             time.sleep(1)
             if sb.execute_script(_ALTCHA_SOLVED_JS):
                 print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮）")
                 return True
 
         print(f"  ⚠️ 第 {attempt + 1} 轮未通过，重试...")
-        # 重新获取坐标（iframe 可能已重新渲染）
+        # 重新获取坐标（widget 可能已重新渲染/展开）
         try:
-            new_coords = sb.execute_script(_ALTCHA_EXPAND_JS)
+            new_coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS) or sb.execute_script(_ALTCHA_EXPAND_JS)
             if new_coords:
                 coords = new_coords
         except Exception:
