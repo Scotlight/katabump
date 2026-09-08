@@ -1329,7 +1329,12 @@ def renew_server(sb):
     # SUSPENDED_RECOVERY_ATTEMPTS 轮），每轮等更久让面板翻转状态后再判，
     # 若任一轮翻成 ok/cooldown 即按该结果返回；全部仍 suspended 才报红。
     if status == RENEW_SUSPENDED and "you can still renew" in (detail or "").lower():
-        recovery_attempts = int(os.environ.get("SUSPENDED_RECOVERY_ATTEMPTS", "2"))
+        # env 可配置重试轮数；非法/非数字兜底用默认 2（绝不因配置炸 run）
+        try:
+            recovery_attempts = int(os.environ.get("SUSPENDED_RECOVERY_ATTEMPTS", "2"))
+        except Exception:
+            recovery_attempts = 2
+        recovery_attempts = max(0, min(recovery_attempts, 5))  # 0 表示不重试，上限 5 防失控
         for i in range(1, recovery_attempts + 1):
             print(f"♻️  [恢复] 服务器已 suspend 但可续期，重试 Renew 提交（{i}/{recovery_attempts}）...")
             time.sleep(4)
