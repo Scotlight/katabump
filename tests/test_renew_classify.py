@@ -176,12 +176,12 @@ _alert_action = app._alert_action
 def alert_is(a):
     return a[2]  # (icon, text, should_alert)[2]
 
-# 静默（健康）：冷却期、无天数 unconfirmed
+# 静默（健康）：冷却期、明确剩余天数 >2 的 unconfirmed
 ok(_alert_action(app.RENEW_COOLDOWN, None)[2] is False, "cooldown(无天数) → 静默")
 ok(_alert_action(app.RENEW_COOLDOWN, 9)[2] is False, "cooldown(9天) → 静默")
-ok(_alert_action(app.RENEW_UNCONFIRMED, None)[2] is False, "unconfirmed(无天数) → 静默[今天场景]")
-ok(_alert_action(app.RENEW_UNCONFIRMED, 7)[2] is False, "unconfirmed(剩7天) → 静默")
+ok(_alert_action(app.RENEW_UNCONFIRMED, 7)[2] is False, "unconfirmed(剩7天>2) → 健康冷却，静默")
 # 真问题 → 告警
+ok(_alert_action(app.RENEW_UNCONFIRMED, None)[2] is True, "unconfirmed(无天数) → 红告警[根因09-08：未知到，绝静默]")
 ok(_alert_action(app.RENEW_SUSPENDED, None)[2] is True, "suspended → 红告警")
 ok(_alert_action(app.RENEW_UNKNOWN, None)[2] is True, "unknown(流程未跑通) → 红告警[不静默]")
 ok(_alert_action(app.RENEW_UNCONFIRMED, 2)[2] is True, "unconfirmed(剩2天) → 红告警")

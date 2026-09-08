@@ -1296,6 +1296,27 @@ def renew_server(sb):
 
     _submit_renew(sb)
     status, detail, remaining_days = _check_renew_result(sb)
+
+    # [根因 09-08 恢复] suspended 但面板提示 “you can still renew it”：
+    # 免费档到期被 suspend 后仍可续期拉回。只报红不动手 = 每次 run 都原地踏步，
+    # 服务器持续 suspend。这里对 suspended 结果主动重试 Renew 提交（最多
+    # SUSPENDED_RECOVERY_ATTEMPTS 轮），每轮等更久让面板翻转状态后再判，
+    # 若任一轮翻成 ok/cooldown 即按该结果返回；全部仍 suspended 才报红。
+    if status == RENEW_SUSPENDED and "you can still renew" in (detail or "").lower():
+        recovery_attempts = int(os.environ.get("SUSPENDED_RECOVERY_ATTEMPTS", "2"))
+        for i in range(1, recovery_attempts + 1):
+            print(f"♻️  [恢复] 服务器已 suspend 但可续期，重试 Renew 提交（{i}/{recovery_attempts}）...")
+            time.sleep(4)
+            if not _open_renew_modal(sb):
+                continue
+            _solve_altcha(sb)
+            _submit_renew(sb)
+            time.sleep(8)  # 给面板足够时间把 suspended 翻回 running
+            status, detail, remaining_days = _check_renew_result(sb)
+            if status != RENEW_SUSPENDED:
+                print(f"✅ [恢复] 第 {i} 轮重试后状态: {status}")
+                return {"status": status, "detail": detail, "before": before, "remaining_days": remaining_days}
+        print("❌ [恢复] 多次重试后仍 suspended，保持红告警。")
     return {"status": status, "detail": detail, "before": before, "remaining_days": remaining_days}
 
 
@@ -1349,9 +1370,15 @@ def _alert_action(status, remaining_days):
         return "❌", "服务器已 suspend，需手动处理", True
     if status == RENEW_UNKNOWN:
         return "❌", "续期流程未跑通，需查看", True
-    if status == RENEW_UNCONFIRMED and remaining_days is not None and remaining_days <= MAX_CONFIRMED_ALERT_DAYS:
+    if status == RENEW_UNCONFIRMED:
+        # 未确认续上就是真问题（宁可红）。只有明确剩余天数且 > MAX_CONFIRMED_ALERT_DAYS，
+        # 即能证明处于健康冷却期，才静默；否则（无天数 / 剩 ≤2 天）一律红告警。
+        # [根因 09-08] 原逻辑对「无天数的 unconfirmed」静默，恰好掩盖了 09-05/09-07 没真正
+        # 续上，拖到 09-08 真挂 reveal。无状态+无到期日 = 无法证明安全，必须告警。
+        if remaining_days is not None and remaining_days > MAX_CONFIRMED_ALERT_DAYS:
+            return "", "", False
         return "❌", "临近到期未确认续上", True
-    # COOLDOWN / UNCONFIRMED(无天数或剩>2)：静默
+    # COOLDOWN：健康冷却，静默
     return "", "", False
 
 
