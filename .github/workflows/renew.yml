@@ -66,18 +66,17 @@ jobs:
         echo "✅ sing-box process alive"
         (command -v ss >/dev/null && ss -tlnp 2>/dev/null | grep 8080) || echo "(ss unavailable)"
         echo "--- proxy connectivity test ---"
-        if ! curl -s -m 30 -x http://127.0.0.1:8080 https://api.ip.sb/ip; then
+        if ! curl -sS -m 30 -x http://127.0.0.1:8080 https://api.ip.sb/ip; then
           echo ""
-          echo "❌ proxy connect FAILED — no reachable anytls node in pool"
-          echo "   The sing-box process is alive but every PROXY_URL/pool node timed out."
-          echo "   Could be cap on the airline nodes, the GH runner egress block, or a bad PROXY_URL."
-          echo "   Check the run's singbox.log artifact for which node the urltest picked."
+          echo "❌ proxy connect FAILED — dialer/chain unreachable from this runner"
+          echo "   The sing-box process is alive but PROXY_URL (and PROXY_CHAIN_URL if set) did not egress."
+          echo "--- singbox.log after fail ---"
+          cat singbox.log || true
           exit 1
         else
           echo ""
           echo "  <- proxy OK"
-          # show which node the urltest group selected (sing-box debug line)
-          grep -iE "urltest|selected|node-" singbox.log | tail -5 || true
+          grep -iE "urltest|selected|node-|ERROR" singbox.log | tail -8 || true
         fi
 
     - name: Run Renew Script
