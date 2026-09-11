@@ -245,9 +245,9 @@ _ALTCHA_EXPAND_JS = """
 # 检测 ALTCHA 是否已验证通过
 # [根因 09-08/09-09] 旧版把「任意 hidden input 值>20」「任意 checkbox disabled」「任意 data-state=verified」
 # 都当成已通过，导致自动化点击后第一轮就“假通过”——其实 widget 从未产出
-# 可提交的后端 token。实测（CDP 真实 click → POST body 带 altcha=eyJhbGc… JWT），
-# 成功续期的必要条件是：AltCHA widget 本体验证通过，即那个 `input#altcha_checkbox_* (I'm not a robot)`
-# 被 widget 置为 disabled（真实点击后才会）。
+# 可提交的后端 token。实测（CDP 真实 click → POST body 带 altcha=eyJhbGc… JWT）。
+# [根因 09-11] 复选框 disabled / widget verified 仍可能没有 JWT（run 34580749435：第 1 轮
+# 「ALTCHA 验证通过」后页面只剩 server-type 警告 → unconfirmed）。提交前必须见到 payload。
 _ALTCHA_SOLVED_JS = """(function(){
     var modal = document.querySelector('div.modal.show') || document;
     if (!modal) return false;
@@ -257,6 +257,24 @@ _ALTCHA_SOLVED_JS = """(function(){
     }
     var wtest = modal.querySelector('altcha-widget[data-verify-state="verified"], altcha-widget[state="verified"], [data-state="verified"]');
     return !!wtest;
+})()
+"""
+
+# 取出可提交的 AltCHA payload（JWT 或 JSON）。不要把完整值打进日志。
+_ALTCHA_TOKEN_JS = """(function(){
+    var modal = document.querySelector('div.modal.show') || document;
+    if (!modal) return '';
+    var nodes = modal.querySelectorAll('input[name="altcha"], input[name="altcha-payload"], input[name="altcha_payload"], input[type="hidden"]');
+    for (var i = 0; i < nodes.length; i++) {
+        var v = (nodes[i].value || '').trim();
+        if (v.length > 20 && (v.indexOf('eyJ') === 0 || v.charAt(0) === '{')) return v;
+    }
+    var w = modal.querySelector('altcha-widget');
+    if (w) {
+        var p = (w.getAttribute('payload') || w.payload || '').toString().trim();
+        if (p.length > 20) return p;
+    }
+    return '';
 })()
 """
 
@@ -911,6 +929,19 @@ def login(sb, email, password) -> bool:
 
 # ===== 自动续期流程 =====
 
+def _altcha_payload_ok(value: str) -> bool:
+    """可提交的 AltCHA payload：JWT（eyJ…）或 JSON，长度须 >20。"""
+    v = (value or "").strip()
+    return len(v) > 20 and (v.startswith("eyJ") or v.startswith("{"))
+
+
+def _altcha_token_ok(sb) -> bool:
+    try:
+        return _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or "")
+    except Exception:
+        return False
+
+
 def _read_alert(sb):
     """读取页面第一个 Bootstrap alert 的文本，找不到返回空串"""
     try:
@@ -918,6 +949,21 @@ def _read_alert(sb):
         return (el.text or "").strip()
     except Exception:
         return ""
+
+
+def _read_alerts(sb):
+    """拼接全部 div.alert。第一块常是 server-type 静态警告，成功/冷却文案可能在后面。"""
+    try:
+        texts = []
+        for el in sb.find_elements("div.alert"):
+            t = (el.text or "").strip()
+            if t and t not in texts:
+                texts.append(t)
+        if texts:
+            return "\n".join(texts)
+    except Exception:
+        pass
+    return _read_alert(sb)
 
 
 def _goto_server_detail(sb) -> bool:
@@ -1022,13 +1068,12 @@ def _open_renew_modal(sb) -> bool:
 
 
 def _solve_altcha(sb) -> bool:
-    """处理 ALTCHA 人机验证"""
+    """处理 ALTCHA 人机验证。只有拿到可提交 payload 才算过（09-11 unconfirmed）。"""
     print("\n🔐 处理 ALTCHA 人机验证...")
     time.sleep(2)
 
-    # 先检查是否已自动通过
-    if sb.execute_script(_ALTCHA_SOLVED_JS):
-        print("✅ ALTCHA 已自动通过")
+    if _altcha_token_ok(sb):
+        print("✅ ALTCHA 已自动通过（token）")
         return True
 
     # 获取 AltCHA 复选框自身屏幕坐标（主策略：真实物理点击复选框，与实测一致）
@@ -1049,9 +1094,14 @@ def _solve_altcha(sb) -> bool:
 
     # 最多尝试 3 轮
     for attempt in range(3):
-        if sb.execute_script(_ALTCHA_SOLVED_JS):
-            print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮）")
+        if _altcha_token_ok(sb):
+            print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，token）")
             return True
+        try:
+            if sb.execute_script(_ALTCHA_SOLVED_JS):
+                print(f"  ℹ️ 复选框已 disabled，仍在等 AltCHA payload（第 {attempt + 1} 轮）")
+        except Exception:
+            pass
 
         # 策略 1: xdotool 物理点击复选框本身（真实用户手势，Cloudflare 才肯发 puzzle）
         if coords:
@@ -1095,8 +1145,8 @@ def _solve_altcha(sb) -> bool:
         # 等待验证结果（AltCHA需几秒算题，最多 ~18s）
         for _ in range(18):
             time.sleep(1)
-            if sb.execute_script(_ALTCHA_SOLVED_JS):
-                print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮）")
+            if _altcha_token_ok(sb):
+                print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，token）")
                 return True
 
         print(f"  ⚠️ 第 {attempt + 1} 轮未通过，重试...")
@@ -1343,16 +1393,29 @@ def _merge_result(cur_st, cur_rd, new_st, new_rd):
 
 def _check_renew_result(sb):
     """读取提示，判定续期是否真生效。返回 (status, detail, remaining_days)。
-    （不再在每个节点尝试内发 TG；由 main 对每个账号统一发一条汇总消息，避免冷却/失败时重复推送）"""
+    提交后面板可能晚几秒才翻文案；第一块 div.alert 常是 server-type 静态警告。
+    轮询全部 alert + 正文，并刷新详情页一次，避免 3 秒就判 unconfirmed。"""
     print("\n📋 检查续期结果...")
-    alert_text = _read_alert(sb)
-    if not alert_text:
+    last = (RENEW_UNCONFIRMED, "", None)
+    refreshed = False
+    for i in range(8):
+        alert_text = _read_alerts(sb)
+        page_text = _read_page_text(sb)
+        status, detail, remaining_days = _classify_renew(alert_text, page_text)
+        print(f"📩 页面提示: {detail}")
+        if status in (RENEW_PASS, RENEW_COOLDOWN, RENEW_SUSPENDED):
+            return status, detail, remaining_days
+        last = (status, detail, remaining_days)
         time.sleep(3)
-        alert_text = _read_alert(sb)
-    page_text = _read_page_text(sb)
-    status, detail, remaining_days = _classify_renew(alert_text, page_text)
-    print(f"📩 页面提示: {detail}")
-    return status, detail, remaining_days
+        if i == 2 and not refreshed:
+            refreshed = True
+            try:
+                print("🔄 刷新详情页再核对续期结果...")
+                sb.refresh()
+                time.sleep(4)
+            except Exception:
+                pass
+    return last
 
 
 def _probe_cooldown_text(page_text):
@@ -1414,7 +1477,9 @@ def renew_server(sb):
 
     altcha_ok = _solve_altcha(sb)
     if not altcha_ok:
-        print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
+        print("❌ ALTCHA 无 token，拒绝提交 Renew（09-11：假通过只会拿到 unconfirmed）")
+        sb.save_screenshot("renew_altcha_no_token.png")
+        return {"status": RENEW_UNKNOWN, "detail": "ALTCHA 无 token，未提交", "before": before, "remaining_days": None}
 
     _submit_renew(sb)
     status, detail, remaining_days = _check_renew_result(sb)
@@ -1543,7 +1608,7 @@ def main():
     except ValueError:
         max_attempts = 0
     if max_attempts <= 0:
-        max_attempts = min(5, pool_n) if pool_n else 2
+        max_attempts = min(5, pool_n) if pool_n else 1
 
     # ------------------------------------------------------------------
     # 告警决策表（用户拍板：只有真问题才告警；能跑但暂时续不上/健康冷却期不吵）。
@@ -1603,7 +1668,10 @@ def main():
                 if st == RENEW_COOLDOWN:
                     # 冷却期是终结态：重试也不会变成可续，直接结束，避免 3 次重复尝试与重复通知
                     break
-                # 未确认/失败：可再换节点试（后续详尽看）。
+                if st == RENEW_UNCONFIRMED and not pool_n:
+                    # 单出口：同一条隧道再跑一遍只会再拿一次 unconfirmed（09-11 run 34580749435）
+                    break
+                # 未确认/失败：有池才换节点再试。
 
         # ---------- 告警决策（见 _alert_action 注释表） ----------
         icon, atext, should_alert = _alert_action(acc_res, acc_rdays)

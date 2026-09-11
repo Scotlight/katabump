@@ -210,6 +210,16 @@ ok(_eu("This site can’t be reached ipv4.icanhazip.com took too long to respond
 
 print("\n✅ 出口探测 `_egress_unusable` 通过 (8 项)")
 
+# ---- ALTCHA payload 闸门（根因 09-11：复选框 disabled 假通过 → unconfirmed）----
+_ap = app._altcha_payload_ok
+ok(_ap("") is False, "空 payload → 不可提交")
+ok(_ap("short") is False, "过短 → 不可提交")
+ok(_ap("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.xx") is True, "JWT eyJ… → 可提交")
+ok(_ap('{"algorithm":"SHA-256","challenge":"abc","signature":"x"}') is True, "JSON payload → 可提交")
+ok(_ap("not-a-token-but-longer-than-twenty-chars") is False, "长但非 JWT/JSON → 不可提交")
+
+print("\n✅ ALTCHA payload 闸门通过 (5 项)")
+
 # ---- PIN_NODE / PROXY_CHAIN_URL（根因 09-11：住宅池全挂，ZooProxy 经 AnyTLS 二跳）----
 import os as _os
 ph_spec = importlib.util.spec_from_file_location("proxy_handler", ROOT / "proxy_handler.py")
@@ -269,4 +279,4 @@ finally:
         _os.environ.pop(k, None)
 
 print("\n✅ PIN_NODE / PROXY_CHAIN_URL 通过 (8 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 8 = 68/68)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 5 + 8 = 73/73)")
