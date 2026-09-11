@@ -66,9 +66,8 @@ jobs:
         echo "✅ sing-box process alive"
         (command -v ss >/dev/null && ss -tlnp 2>/dev/null | grep 8080) || echo "(ss unavailable)"
         echo "--- proxy connectivity test ---"
-        # generate_204 first: some HTTP exits RST ip.sb but still egress.
-        if curl -sS -m 20 -o /dev/null -w "gstatic:%{http_code}\n" -x http://127.0.0.1:8080 https://www.gstatic.com/generate_204 \
-           || curl -sS -m 20 -x http://127.0.0.1:8080 https://api.ip.sb/ip; then
+        # icanhazip：api.ip.sb / gstatic 在部分出口会被 RST，不等于隧道没通。
+        if curl -sS -m 20 -x http://127.0.0.1:8080 https://ipv4.icanhazip.com; then
           echo ""
           echo "  <- proxy OK"
           grep -iE "urltest|selected|node-|ERROR" singbox.log | tail -8 || true
@@ -78,8 +77,7 @@ jobs:
           echo "   The sing-box process is alive but PROXY_URL (and PROXY_CHAIN_URL if set) did not egress."
           echo "--- singbox.log after fail ---"
           cat singbox.log || true
-          # Do not exit 1 here; let the renew script fail and report UNKNOWN
-          # exit 1
+          exit 1
         fi
 
     - name: Run Renew Script

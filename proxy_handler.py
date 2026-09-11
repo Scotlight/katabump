@@ -449,6 +449,7 @@ def main():
                 "tag": "http-in",
                 "listen": LISTEN_HOST,
                 "listen_port": LISTEN_PORT,
+                "sniff": True,
             }
         ],
         "outbounds": outbounds,

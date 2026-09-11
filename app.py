@@ -342,7 +342,7 @@ def _xdotool_click(x: int, y: int):
 
 
 def _egress_unusable(ip_text: str) -> bool:
-    """出口探测页是否不可用。api.ip.sb 应返回纯 IP；ERR_CONNECTION_RESET / chrome 错误页则换节点。"""
+    """出口探测页是否不可用。探测页应返回纯 IP；ERR_CONNECTION_RESET / chrome 错误页则换节点。"""
     t = (ip_text or "").strip()
     if not t:
         return True
@@ -1459,7 +1459,7 @@ def _run_account(sb_kwargs, email, pwd):
             # 在首次导航前注入 Turnstile attachShadow CDP 钩子（对所有后续文档生效，含登录页）
             _install_turnstile_hook_cdp(sb)
             try:
-                sb.open("https://api.ip.sb/ip")
+                sb.open("https://ipv4.icanhazip.com")
                 ip_text = (sb.get_text("body") or "").strip()
                 print(f"📍  当前出口IP: {ip_text}")
                 if _egress_unusable(ip_text):

@@ -205,7 +205,7 @@ ok(_eu("This site can’t be reached The connection was reset. ERR_CONNECTION_RE
 ok(_eu("This site can't be reached") is True, "can't be reached → 不可用")
 ok(_eu("chrome-error://chromewebdata/") is True, "chrome-error URL → 不可用")
 ok(_eu("not an ip at all") is True, "无 IP 的乱文 → 不可用")
-ok(_eu("This site can’t be reached api.ip.sb took too long to respond. ERR_TIMED_OUT") is True,
+ok(_eu("This site can’t be reached ipv4.icanhazip.com took too long to respond. ERR_TIMED_OUT") is True,
    "chrome ERR_TIMED_OUT → 不可用")
 
 print("\n✅ 出口探测 `_egress_unusable` 通过 (8 项)")
