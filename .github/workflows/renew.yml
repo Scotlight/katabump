@@ -78,7 +78,8 @@ jobs:
           echo "   The sing-box process is alive but PROXY_URL (and PROXY_CHAIN_URL if set) did not egress."
           echo "--- singbox.log after fail ---"
           cat singbox.log || true
-          exit 1
+          # Do not exit 1 here; let the renew script fail and report UNKNOWN
+          # exit 1
         fi
 
     - name: Run Renew Script
