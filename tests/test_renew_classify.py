@@ -5,6 +5,7 @@
 要求能 import app.py（顶层 import requests/seleniumbase；测试会先打空桩，无需真安装 Selenium）。
 """
 import importlib.util
+import json
 import sys
 import types
 
@@ -204,6 +205,51 @@ ok(_eu("This site can’t be reached The connection was reset. ERR_CONNECTION_RE
 ok(_eu("This site can't be reached") is True, "can't be reached → 不可用")
 ok(_eu("chrome-error://chromewebdata/") is True, "chrome-error URL → 不可用")
 ok(_eu("not an ip at all") is True, "无 IP 的乱文 → 不可用")
+ok(_eu("This site can’t be reached api.ip.sb took too long to respond. ERR_TIMED_OUT") is True,
+   "chrome ERR_TIMED_OUT → 不可用")
 
-print("\n✅ 出口探测 `_egress_unusable` 通过 (7 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 7 = 59/59)")
+print("\n✅ 出口探测 `_egress_unusable` 通过 (8 项)")
+
+# ---- PIN_NODE 钉死出口（根因 09-11：urltest 反复抽 RST 节点）----
+import os as _os
+ph_spec = importlib.util.spec_from_file_location("proxy_handler", ROOT / "proxy_handler.py")
+ph = importlib.util.module_from_spec(ph_spec)
+ph_spec.loader.exec_module(ph)
+
+_orig_cwd = _os.getcwd()
+_tmpdir = ROOT / ".pin-test-tmp"
+_tmpdir.mkdir(exist_ok=True)
+try:
+    _os.chdir(_tmpdir)
+    _os.environ["PROXY_URL"] = "http://example.invalid:8080"
+    _os.environ["POOL_FILE"] = str(ROOT / "pool.json")
+    _os.environ["PIN_NODE"] = "2"
+    ph.main()
+    cfg = json.loads((_tmpdir / "config.json").read_text())
+    tags = [o.get("tag") for o in cfg["outbounds"]]
+    proxy_ob = next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")
+    ok("urltest" not in [o.get("type") for o in cfg["outbounds"]], "PIN_NODE=2 无 urltest")
+    ok(proxy_ob.get("server") == "200.118.71.12" and proxy_ob.get("server_port") == 8080,
+       "PIN_NODE=2 → Telmex-CO 200.118.71.12:8080")
+    ok(cfg.get("route", {}).get("final") == "proxy", "route.final=proxy")
+    _os.environ["PIN_NODE"] = "1"
+    ph.main()
+    cfg1 = json.loads((_tmpdir / "config.json").read_text())
+    p1 = next(o for o in cfg1["outbounds"] if o.get("tag") == "proxy")
+    ok(p1.get("server") == "104.251.93.55", "PIN_NODE=1 → Frontier-US-1")
+    del _os.environ["PIN_NODE"]
+    ph.main()
+    cfgp = json.loads((_tmpdir / "config.json").read_text())
+    types = [o.get("type") for o in cfgp["outbounds"]]
+    ok("urltest" in types, "无 PIN_NODE → urltest 池")
+finally:
+    _os.chdir(_orig_cwd)
+    for p in _tmpdir.glob("*"):
+        p.unlink()
+    _tmpdir.rmdir()
+    _os.environ.pop("PIN_NODE", None)
+    _os.environ.pop("POOL_FILE", None)
+    _os.environ.pop("PROXY_URL", None)
+
+print("\n✅ PIN_NODE 钉死出口通过 (5 项)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 5 = 65/65)")

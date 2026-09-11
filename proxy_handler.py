@@ -400,14 +400,36 @@ def main():
 
     # 若 base proxy 有 pool.json，展开成多节点 + urltest 组（自动挑可达/最快节点）。
     # 适用于 anytls，以及住宅代理 http/socks（residential pool，避免单点挂）。
+    # PIN_NODE=N（1-based）：钉死第 N 只，不走 urltest。续期重试时按序换出口，避免
+    # 重启后 urltest 再次选中同一只 RST/超时节点（09-11 实锤）。
     outbounds = [outbound, {"type": "direct", "tag": "direct"}]
     if scheme in ("anytls", "http", "https", "socks5", "socks", "https"):
         pool = _load_pool()
         if pool:
-            node_obs = _build_pool_outbounds(outbound, pool)
-            if node_obs:
-                outbounds = node_obs
-                print(f"  Pool mode: {len(pool)} nodes + urltest")
+            pin_raw = (os.environ.get("PIN_NODE") or "").strip()
+            pin = None
+            if pin_raw:
+                try:
+                    pin = int(pin_raw)
+                except ValueError:
+                    pin = None
+            if pin is not None and 1 <= pin <= len(pool):
+                node_obs = _build_pool_outbounds(outbound, [pool[pin - 1]])
+                # _build_pool_outbounds 仍会加 urltest；单节点时把该节点直接标成 proxy
+                pinned = [ob for ob in node_obs if ob.get("tag") == "node-1"]
+                if pinned:
+                    pinned[0]["tag"] = "proxy"
+                    outbounds = [pinned[0], {"type": "direct", "tag": "direct"}]
+                    n = pool[pin - 1]
+                    print(f"  Pin mode: #{pin} {n.get('name')} {n.get('server')}:{n.get('port')}")
+                else:
+                    outbounds = node_obs
+                    print(f"  Pool mode: {len(pool)} nodes + urltest")
+            else:
+                node_obs = _build_pool_outbounds(outbound, pool)
+                if node_obs:
+                    outbounds = node_obs
+                    print(f"  Pool mode: {len(pool)} nodes + urltest")
 
     config = {
         "log": {"level": "info", "timestamp": True},

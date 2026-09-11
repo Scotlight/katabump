@@ -38,6 +38,7 @@ jobs:
     - name: Start Proxy (sing-box)
       env:
         PROXY_URL: ${{ secrets.PROXY_URL }}
+        PIN_NODE: "1"
       run: |
         if [ -z "$PROXY_URL" ]; then
           echo "PROXY_URL not set, skipping sing-box setup."

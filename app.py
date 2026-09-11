@@ -350,6 +350,8 @@ def _egress_unusable(ip_text: str) -> bool:
     needles = (
         "can't be reached",
         "err_connection",
+        "err_timed_out",
+        "took too long to respond",
         "chrome-error",
         "connection was reset",
         "this site can't be reached",
@@ -375,15 +377,29 @@ def _turnstile_present(sb) -> bool:
         return False
 
 
-def _restart_proxy():
-    """重启 sing-box，让 urltest 重新探测，可能选中池子里另一个节点。
+def _pool_size():
+    try:
+        with open(os.environ.get("POOL_FILE", "pool.json")) as f:
+            data = json.load(f)
+        return len([n for n in data if n.get("server") and n.get("port")])
+    except Exception:
+        return 0
+
+
+def _restart_proxy(pin=None):
+    """重启 sing-box。pin 为 1-based 池下标时钉死该节点（不走 urltest）。
 
     仅在 GitHub Actions 环境生效（本地无 sing-box 可执行文件则跳过）。
     """
     if not os.path.exists("sing-box"):
         print("  （本环境无 sing-box 可执行文件，跳过代理节点切换）")
         return
-    print("\n🔄 重启 sing-box 以切换代理节点...")
+    if pin is not None:
+        os.environ["PIN_NODE"] = str(pin)
+        print(f"\n🔄 重启 sing-box，钉死池节点 #{pin} ...")
+        subprocess.run(["python3", "proxy_handler.py"], check=False)
+    else:
+        print("\n🔄 重启 sing-box 以切换代理节点...")
     subprocess.run(["pkill", "-9", "-f", "sing-box"], capture_output=True)
     time.sleep(2)
     log = open("singbox.log", "ab")
@@ -394,8 +410,8 @@ def _restart_proxy():
         )
     finally:
         log.close()
-    # 等待 urltest 组完成第一轮探测
-    time.sleep(26)
+    # 钉死单节点无需等 urltest；urltest 模式仍给探测窗口
+    time.sleep(6 if pin is not None else 26)
     try:
         with open("singbox.log", "rb") as f:
             lines = f.read().decode("utf-8", "ignore").splitlines()
@@ -760,12 +776,23 @@ def handle_turnstile(sb) -> bool:
 def login(sb, email, password) -> bool:
     print(f"🌐 打开登录页面: {BASE_URL}/auth/login")
     sb.uc_open_with_reconnect(BASE_URL + "/auth/login", reconnect_time=8)
-    time.sleep(6)
+    time.sleep(3)
 
-    # 先等待 Cloudflare 验证通过（最多等 30 秒）
+    cur_url = (sb.get_current_url() or "").lower()
+    if "chrome-error" in cur_url or "chromewebdata" in cur_url:
+        print(f"❌ 登录页 chrome-error，换节点。(URL: {sb.get_current_url()})")
+        sb.save_screenshot("login_chrome_error.png")
+        return False
+
+    # 先等待 Cloudflare 验证通过（最多等 20 秒；chrome-error 立即失败）
     print("⏳ 等待 Cloudflare 验证通过...")
     cf_passed = False
-    for i in range(30):
+    for i in range(20):
+        cur_url = (sb.get_current_url() or "").lower()
+        if "chrome-error" in cur_url or "chromewebdata" in cur_url:
+            print(f"❌ 登录页 chrome-error，换节点。(URL: {sb.get_current_url()})")
+            sb.save_screenshot("login_chrome_error.png")
+            return False
         page_src = sb.get_page_source() or ""
         if 'input[name="email"]' in page_src.lower() or 'name="email"' in page_src.lower():
             cf_passed = True
@@ -1510,7 +1537,13 @@ def main():
     renewed = 0
     cooldown = 0
     failed = 0
-    max_attempts = int(os.environ.get("NODE_ATTEMPTS", "3"))
+    pool_n = _pool_size()
+    try:
+        max_attempts = int(os.environ.get("NODE_ATTEMPTS", "0") or "0")
+    except ValueError:
+        max_attempts = 0
+    if max_attempts <= 0:
+        max_attempts = min(5, pool_n) if pool_n else 3
 
     # ------------------------------------------------------------------
     # 告警决策表（用户拍板：只有真问题才告警；能跑但暂时续不上/健康冷却期不吵）。
@@ -1550,7 +1583,10 @@ def main():
         else:
             for attempt in range(1, max_attempts + 1):
                 print(f"  ── 节点尝试 {attempt}/{max_attempts} ──")
-                if attempt > 1:
+                # 按池顺序钉死出口（1=Frontier-US-1 …），避免 urltest 反复抽到 RST 节点。
+                if pool_n:
+                    _restart_proxy(pin=attempt)
+                elif attempt > 1:
                     _restart_proxy()
                 st, detail, rdays = _run_account(sb_kwargs, email, pwd)
                 # 按严肃度合并（见 _merge_result）：已知瞬态 unknown 不覆盖已确证健康/冷却
