@@ -7,6 +7,7 @@ import time
 import subprocess
 import requests
 import re
+import base64
 from seleniumbase import SB
 
 # 从环境变量获取账号密码和 TG 配置
@@ -248,6 +249,8 @@ _ALTCHA_EXPAND_JS = """
 # 可提交的后端 token。实测（CDP 真实 click → POST body 带 altcha=eyJhbGc… JWT）。
 # [根因 09-11] 复选框 disabled / widget verified 仍可能没有 JWT（run 34580749435：第 1 轮
 # 「ALTCHA 验证通过」后页面只剩 server-type 警告 → unconfirmed）。提交前必须见到 payload。
+# [根因 09-11 续] run 34582227577：点击后 3s 就报「token」——那是 widget 预填的
+# **challenge JWT**（无 number），不是算完的 solution。提交被后端拒，仍 unconfirmed。
 _ALTCHA_SOLVED_JS = """(function(){
     var modal = document.querySelector('div.modal.show') || document;
     if (!modal) return false;
@@ -260,21 +263,96 @@ _ALTCHA_SOLVED_JS = """(function(){
 })()
 """
 
-# 取出可提交的 AltCHA payload（JWT 或 JSON）。不要把完整值打进日志。
+# 取出 input[name=altcha] 的值。不要读 widget.payload（那是 challenge）。不要把完整值打进日志。
 _ALTCHA_TOKEN_JS = """(function(){
     var modal = document.querySelector('div.modal.show') || document;
     if (!modal) return '';
-    var nodes = modal.querySelectorAll('input[name="altcha"], input[name="altcha-payload"], input[name="altcha_payload"], input[type="hidden"]');
+    var nodes = modal.querySelectorAll('input[name="altcha"], input[name="altcha-payload"], input[name="altcha_payload"]');
     for (var i = 0; i < nodes.length; i++) {
         var v = (nodes[i].value || '').trim();
         if (v.length > 20 && (v.indexOf('eyJ') === 0 || v.charAt(0) === '{')) return v;
     }
-    var w = modal.querySelector('altcha-widget');
-    if (w) {
-        var p = (w.getAttribute('payload') || w.payload || '').toString().trim();
-        if (p.length > 20) return p;
-    }
     return '';
+})()
+"""
+
+# 钩住 fetch/XHR，确认 Renew 真的 POST 了 /api-client/renew（不记录 body）。
+_RENEW_NET_HOOK_JS = """(function(){
+    if (window.__renewNetHooked) return 'already';
+    window.__renewNetHooked = true;
+    window.__renewNet = {posted:false, status:0, hasAltcha:false, url:''};
+    function note(url, status, body){
+        var u = String(url || '');
+        if (u.indexOf('renew') === -1 && u.indexOf('Renew') === -1) return;
+        window.__renewNet.posted = true;
+        window.__renewNet.status = status || 0;
+        window.__renewNet.url = u.slice(0, 180);
+        var s = '';
+        try {
+            if (typeof body === 'string') s = body;
+            else if (body && typeof body.toString === 'function') s = String(body);
+        } catch (e) {}
+        window.__renewNet.hasAltcha = /altcha=eyJ/.test(s) || /name="altcha"/.test(s) || /"altcha"/.test(s);
+    }
+    var origFetch = window.fetch;
+    if (origFetch) {
+        window.fetch = function(){
+            var url = arguments[0];
+            if (url && url.url) url = url.url;
+            var opts = arguments[1] || {};
+            var body = opts.body;
+            return origFetch.apply(this, arguments).then(function(r){
+                note(url, r.status, body);
+                return r;
+            });
+        };
+    }
+    var origOpen = XMLHttpRequest.prototype.open;
+    var origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(m, u){
+        this.__renewUrl = u;
+        return origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(body){
+        var xhr = this;
+        xhr.addEventListener('loadend', function(){
+            note(xhr.__renewUrl, xhr.status, body);
+        });
+        return origSend.apply(this, arguments);
+    };
+    document.addEventListener('submit', function(ev){
+        var f = ev.target;
+        if (!f) return;
+        var action = (f.getAttribute && f.getAttribute('action')) || f.action || '';
+        var has = false;
+        try {
+            var fd = new FormData(f);
+            var a = fd.get('altcha') || fd.get('altcha-payload') || fd.get('altcha_payload');
+            has = !!(a && String(a).indexOf('eyJ') === 0);
+        } catch (e) {}
+        note(action, 0, has ? 'altcha=eyJ' : '');
+    }, true);
+    return 'hooked';
+})()
+"""
+
+_RENEW_NET_READ_JS = """(function(){
+    var n = window.__renewNet || {};
+    var entries = [];
+    try {
+        var pe = performance.getEntries ? performance.getEntries() : [];
+        for (var i = 0; i < pe.length; i++) {
+            var name = pe[i].name || '';
+            if (/renew/i.test(name)) entries.push(name.slice(0, 180));
+        }
+    } catch (e) {}
+    return {
+        posted: !!n.posted,
+        status: n.status || 0,
+        hasAltcha: !!n.hasAltcha,
+        url: n.url || '',
+        perf: entries.slice(0, 5)
+    };
 })()
 """
 
@@ -929,10 +1007,58 @@ def login(sb, email, password) -> bool:
 
 # ===== 自动续期流程 =====
 
-def _altcha_payload_ok(value: str) -> bool:
-    """可提交的 AltCHA payload：JWT（eyJ…）或 JSON，长度须 >20。"""
+def _altcha_jwt_claims(value: str):
+    """解码 JWT payload（不验签）。失败返回 None。"""
+    parts = (value or "").split(".")
+    if len(parts) < 2:
+        return None
+    pad = "=" * ((4 - len(parts[1]) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(parts[1] + pad)
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _altcha_claims(value: str):
+    """JWT 或 JSON 的 claims。不把原值打进日志。"""
     v = (value or "").strip()
-    return len(v) > 20 and (v.startswith("eyJ") or v.startswith("{"))
+    if not v:
+        return None
+    if v.startswith("eyJ") and "." in v:
+        return _altcha_jwt_claims(v)
+    if v.startswith("{"):
+        try:
+            data = json.loads(v)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _altcha_payload_kind(value: str) -> str:
+    """empty / challenge-jwt / solved-jwt / challenge-json / solved-json / other。"""
+    v = (value or "").strip()
+    if not v:
+        return "empty"
+    claims = _altcha_claims(v)
+    solved = False
+    if isinstance(claims, dict) and (
+        claims.get("number") is not None or claims.get("solution") is not None
+    ):
+        solved = True
+    if v.startswith("eyJ"):
+        return "solved-jwt" if solved else "challenge-jwt"
+    if v.startswith("{"):
+        return "solved-json" if solved else "challenge-json"
+    return "other"
+
+
+def _altcha_payload_ok(value: str) -> bool:
+    """可提交的 AltCHA solution：JWT/JSON 且带 PoW number（challenge JWT 不算）。"""
+    kind = _altcha_payload_kind(value)
+    return kind in ("solved-jwt", "solved-json")
 
 
 def _altcha_token_ok(sb) -> bool:
@@ -940,6 +1066,13 @@ def _altcha_token_ok(sb) -> bool:
         return _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or "")
     except Exception:
         return False
+
+
+def _altcha_token_kind(sb) -> str:
+    try:
+        return _altcha_payload_kind(sb.execute_script(_ALTCHA_TOKEN_JS) or "")
+    except Exception:
+        return "empty"
 
 
 def _read_alert(sb):
@@ -1061,6 +1194,10 @@ def _open_renew_modal(sb) -> bool:
     try:
         sb.find_element('div.modal.show', timeout=5)
         print("✅ Renew 模态框已弹出")
+        try:
+            sb.execute_script(_RENEW_NET_HOOK_JS)
+        except Exception:
+            pass
         return True
     except Exception:
         print("⚠️ 模态框未弹出")
@@ -1068,12 +1205,14 @@ def _open_renew_modal(sb) -> bool:
 
 
 def _solve_altcha(sb) -> bool:
-    """处理 ALTCHA 人机验证。只有拿到可提交 payload 才算过（09-11 unconfirmed）。"""
+    """处理 ALTCHA 人机验证。只有拿到带 PoW number 的 solution 才算过。"""
     print("\n🔐 处理 ALTCHA 人机验证...")
     time.sleep(2)
 
-    if _altcha_token_ok(sb):
-        print("✅ ALTCHA 已自动通过（token）")
+    kind0 = _altcha_token_kind(sb)
+    print(f"  ℹ️ 当前 AltCHA payload: {kind0}")
+    if kind0 in ("solved-jwt", "solved-json"):
+        print("✅ ALTCHA 已自动通过（solved）")
         return True
 
     # 获取 AltCHA 复选框自身屏幕坐标（主策略：真实物理点击复选框，与实测一致）
@@ -1094,12 +1233,15 @@ def _solve_altcha(sb) -> bool:
 
     # 最多尝试 3 轮
     for attempt in range(3):
-        if _altcha_token_ok(sb):
-            print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，token）")
+        kind = _altcha_token_kind(sb)
+        if kind in ("solved-jwt", "solved-json"):
+            print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，{kind}）")
             return True
+        if kind in ("challenge-jwt", "challenge-json"):
+            print(f"  ℹ️ 仅有 challenge（{kind}），还在等 PoW solution（第 {attempt + 1} 轮）")
         try:
             if sb.execute_script(_ALTCHA_SOLVED_JS):
-                print(f"  ℹ️ 复选框已 disabled，仍在等 AltCHA payload（第 {attempt + 1} 轮）")
+                print(f"  ℹ️ 复选框已 disabled，仍在等 AltCHA solution（第 {attempt + 1} 轮）")
         except Exception:
             pass
 
@@ -1145,8 +1287,9 @@ def _solve_altcha(sb) -> bool:
         # 等待验证结果（AltCHA需几秒算题，最多 ~18s）
         for _ in range(18):
             time.sleep(1)
-            if _altcha_token_ok(sb):
-                print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，token）")
+            kind = _altcha_token_kind(sb)
+            if kind in ("solved-jwt", "solved-json"):
+                print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，{kind}）")
                 return True
 
         print(f"  ⚠️ 第 {attempt + 1} 轮未通过，重试...")
@@ -1165,8 +1308,14 @@ def _solve_altcha(sb) -> bool:
 
 
 def _submit_renew(sb):
-    """点击模态框内的 Renew 提交按钮"""
+    """点击模态框内的 Renew 提交按钮，并记录是否真 POST 了 /renew。"""
     print("🖱️  点击模态框中的 Renew 按钮...")
+    try:
+        sb.execute_script(_RENEW_NET_HOOK_JS)
+    except Exception:
+        pass
+    kind = _altcha_token_kind(sb)
+    print(f"  ℹ️ 提交前 AltCHA payload: {kind}")
     try:
         submit = sb.find_element('div.modal.show button.btn-primary', timeout=5)
         submit.click()
@@ -1181,6 +1330,17 @@ def _submit_renew(sb):
             })()
         """)
     time.sleep(3)
+    try:
+        net = sb.execute_script(_RENEW_NET_READ_JS) or {}
+        print(
+            f"  ℹ️ Renew 网络: posted={net.get('posted')} status={net.get('status')} "
+            f"hasAltcha={net.get('hasAltcha')} url={net.get('url') or '-'} "
+            f"perf={net.get('perf') or []}"
+        )
+        return net
+    except Exception as e:
+        print(f"  ⚠️ 读 Renew 网络钩子失败: {e}")
+        return {}
 
 
 
@@ -1477,12 +1637,25 @@ def renew_server(sb):
 
     altcha_ok = _solve_altcha(sb)
     if not altcha_ok:
-        print("❌ ALTCHA 无 token，拒绝提交 Renew（09-11：假通过只会拿到 unconfirmed）")
+        kind = _altcha_token_kind(sb)
+        print(f"❌ ALTCHA 无 solution（{kind}），拒绝提交 Renew（09-11：challenge JWT 提交只会 unconfirmed）")
         sb.save_screenshot("renew_altcha_no_token.png")
-        return {"status": RENEW_UNKNOWN, "detail": "ALTCHA 无 token，未提交", "before": before, "remaining_days": None}
+        return {"status": RENEW_UNKNOWN, "detail": f"ALTCHA 无 solution（{kind}），未提交", "before": before, "remaining_days": None}
 
-    _submit_renew(sb)
+    net = _submit_renew(sb)
     status, detail, remaining_days = _check_renew_result(sb)
+    if status == RENEW_UNCONFIRMED:
+        posted = bool(net.get("posted")) if isinstance(net, dict) else False
+        has_altcha = bool(net.get("hasAltcha")) if isinstance(net, dict) else False
+        http_st = net.get("status") if isinstance(net, dict) else None
+        extra = f" posted={posted} http={http_st} hasAltcha={has_altcha}"
+        print(f"⚠️ 提交后仍 unconfirmed。{extra}")
+        if not posted:
+            detail = (detail or "") + " | Renew 未观察到 POST"
+        elif http_st and int(http_st) >= 400:
+            detail = (detail or "") + f" | Renew HTTP {http_st}"
+        elif not has_altcha:
+            detail = (detail or "") + " | POST 未见 altcha=eyJ"
 
     # [根因 09-08 恢复] suspended 但面板提示 “you can still renew it”：
     # 免费档到期被 suspend 后仍可续期拉回。只报红不动手 = 每次 run 都原地踏步，
