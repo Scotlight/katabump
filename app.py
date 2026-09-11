@@ -243,6 +243,29 @@ _ALTCHA_EXPAND_JS = """
 })()
 """
 
+# 复选框 0 尺寸时：用 widget / 标签盒做物理点击（run 34583428105 没拿到坐标，只点了 SB click）。
+_ALTCHA_WIDGET_BOX_JS = """(function(){
+    var modal = document.querySelector('div.modal.show') || document;
+    var sels = [
+        'altcha-widget',
+        '[id^="altcha_checkbox"]',
+        'label[for^="altcha_checkbox"]',
+        '.altcha',
+        '[class*="altcha"]'
+    ];
+    for (var s = 0; s < sels.length; s++) {
+        var nodes = modal.querySelectorAll(sels[s]);
+        for (var i = 0; i < nodes.length; i++) {
+            var r = nodes[i].getBoundingClientRect();
+            if (r && r.width >= 8 && r.height >= 8) {
+                return { cx: Math.round(r.x + Math.min(24, r.width/4)), cy: Math.round(r.y + r.height/2), src: sels[s] };
+            }
+        }
+    }
+    return null;
+})()
+"""
+
 # 检测 ALTCHA 是否已验证通过
 # [根因 09-08/09-09] 旧版把「任意 hidden input 值>20」「任意 checkbox disabled」「任意 data-state=verified」
 # 都当成已通过，导致自动化点击后第一轮就“假通过”——其实 widget 从未产出
@@ -1215,21 +1238,40 @@ def _solve_altcha(sb) -> bool:
         print("✅ ALTCHA 已自动通过（solved）")
         return True
 
-    # 获取 AltCHA 复选框自身屏幕坐标（主策略：真实物理点击复选框，与实测一致）
-    coords = None
-    try:
-        coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS)
-    except Exception:
-        coords = None
-    # 坐标无效(0,0)则退回旧的 iframe 坐标启发
-    if not coords or (coords.get('cx')==0 and coords.get('cy')==0):
+    def _altcha_coords():
+        for js, label in (
+            (_ALTCHA_CHECKPOINT_JS, "checkbox"),
+            (_ALTCHA_EXPAND_JS, "iframe"),
+            (_ALTCHA_WIDGET_BOX_JS, "widget-box"),
+        ):
+            try:
+                c = sb.execute_script(js)
+            except Exception:
+                c = None
+            if c and c.get("cx") and c.get("cy"):
+                src = c.get("src") or label
+                print(f"  📍 找到 ALTCHA 坐标: ({c['cx']}, {c['cy']}) via {src}")
+                return c
+        print("  ⚠️ 未拿到 ALTCHA 坐标（checkbox/iframe/widget 都 0 尺寸）")
         try:
-            coords = sb.execute_script(_ALTCHA_EXPAND_JS)
+            info = sb.execute_script("""(function(){
+                var m = document.querySelector('div.modal.show') || document;
+                var w = m.querySelector('altcha-widget');
+                var cb = m.querySelector('input[id^="altcha_checkbox"]');
+                var ifr = m.querySelectorAll('iframe').length;
+                function box(el){
+                    if (!el) return null;
+                    var r = el.getBoundingClientRect();
+                    return {tag: el.tagName, w: Math.round(r.width), h: Math.round(r.height)};
+                }
+                return {widget: box(w), checkbox: box(cb), iframes: ifr};
+            })()""")
+            print(f"  ℹ️ AltCHA DOM: {info}")
         except Exception:
-            coords = None
+            pass
+        return None
 
-    if coords:
-        print(f"  📍 找到 ALTCHA 坐标: ({coords['cx']}, {coords['cy']})")
+    coords = _altcha_coords()
 
     # 最多尝试 3 轮
     for attempt in range(3):
@@ -1293,15 +1335,7 @@ def _solve_altcha(sb) -> bool:
                 return True
 
         print(f"  ⚠️ 第 {attempt + 1} 轮未通过，重试...")
-        # 重新获取坐标（widget 可能已重新渲染/展开）
-        try:
-            new_coords = sb.execute_script(_ALTCHA_CHECKPOINT_JS)
-            if not new_coords or (new_coords.get('cx')==0 and new_coords.get('cy')==0):
-                new_coords = sb.execute_script(_ALTCHA_EXPAND_JS)
-            if new_coords:
-                coords = new_coords
-        except Exception:
-            pass
+        coords = _altcha_coords() or coords
 
     print("  ❌ ALTCHA 3 轮均失败")
     return False
