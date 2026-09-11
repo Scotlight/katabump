@@ -192,4 +192,18 @@ ok(_alert_action(app.RENEW_PASS, None)[2] is False
    and _alert_action(app.RENEW_PASS, None)[0] == "✅", "PASS → ✅通知(非告警)")
 
 print("\n✅ 告警决策 `_alert_action` 测试通过 (10 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 = 52/52)")
+
+
+# ---- 出口探测 `_egress_unusable`（根因 09-11：ERR_CONNECTION_RESET 仍去登录）----
+_eu = app._egress_unusable
+ok(_eu("") is True, "空出口文本 → 不可用")
+ok(_eu("148.244.144.194") is False, "纯 IPv4 → 可用")
+ok(_eu("104.251.93.55") is False, "Frontier 家宽 IP → 可用")
+ok(_eu("This site can’t be reached The connection was reset. ERR_CONNECTION_RESET") is True,
+   "chrome ERR_CONNECTION_RESET → 不可用")
+ok(_eu("This site can't be reached") is True, "can't be reached → 不可用")
+ok(_eu("chrome-error://chromewebdata/") is True, "chrome-error URL → 不可用")
+ok(_eu("not an ip at all") is True, "无 IP 的乱文 → 不可用")
+
+print("\n✅ 出口探测 `_egress_unusable` 通过 (7 项)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 7 = 59/59)")

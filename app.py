@@ -341,6 +341,40 @@ def _xdotool_click(x: int, y: int):
         os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
 
 
+def _egress_unusable(ip_text: str) -> bool:
+    """出口探测页是否不可用。api.ip.sb 应返回纯 IP；ERR_CONNECTION_RESET / chrome 错误页则换节点。"""
+    t = (ip_text or "").strip()
+    if not t:
+        return True
+    low = t.lower().replace("’", "'")
+    needles = (
+        "can't be reached",
+        "err_connection",
+        "chrome-error",
+        "connection was reset",
+        "this site can't be reached",
+        "err_tunnel",
+        "err_proxy",
+    )
+    if any(s in low for s in needles):
+        return True
+    return re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", t) is None
+
+
+def _turnstile_token_ok(sb) -> bool:
+    try:
+        return bool(sb.execute_script(_SOLVED_JS))
+    except Exception:
+        return False
+
+
+def _turnstile_present(sb) -> bool:
+    try:
+        return bool(sb.execute_script(_EXISTS_JS))
+    except Exception:
+        return False
+
+
 def _restart_proxy():
     """重启 sing-box，让 urltest 重新探测，可能选中池子里另一个节点。
 
@@ -774,23 +808,53 @@ def login(sb, email, password) -> bool:
     js_fill_input(sb, 'input[name="password"]', password)
     time.sleep(1)
 
-    # 等待 Turnstile 验证框出现（最多 10 秒）
+    # 等待 Turnstile widget 或静默 token（最多 10 秒）
     print("⏳ 等待 Turnstile 验证框出现...")
     ts_found = False
     for i in range(10):
-        if sb.execute_script(_EXISTS_JS):
+        if _turnstile_token_ok(sb):
+            print(f"✅ Turnstile 已静默签发 token（{i+1}s）")
+            ts_found = True
+            break
+        if _turnstile_present(sb):
             ts_found = True
             print(f"✅ 检测到 Turnstile（{i+1}s）")
             break
         time.sleep(1)
 
-    if ts_found:
+    if ts_found and not _turnstile_token_ok(sb):
         if not handle_turnstile(sb):
             print("❌ 登录界面的 Turnstile 验证失败")
             sb.save_screenshot("login_turnstile_fail.png")
             return False
-    else:
-        print("ℹ️ 未检测到 Turnstile")
+    elif not ts_found:
+        # CF auto 有时晚渲染：再等静默 token / 延迟 widget，仍没有就拒绝提交。
+        # [根因 09-11] Alestra-MX 出口「未检测到 Turnstile」仍回车 → login?error=captcha。
+        print("ℹ️ 未检测到 Turnstile widget，继续等静默 token...")
+        delayed = False
+        for i in range(8):
+            if _turnstile_token_ok(sb):
+                print(f"✅ Turnstile 静默签发 token（+{i+1}s）")
+                delayed = True
+                break
+            if _turnstile_present(sb):
+                print(f"✅ 延迟检测到 Turnstile（+{i+1}s）")
+                if not handle_turnstile(sb):
+                    print("❌ 登录界面的 Turnstile 验证失败")
+                    sb.save_screenshot("login_turnstile_fail.png")
+                    return False
+                delayed = True
+                break
+            time.sleep(1)
+        if not delayed:
+            print("❌ 无 Turnstile token，拒绝提交登录（避免 login?error=captcha）")
+            sb.save_screenshot("login_no_turnstile_token.png")
+            return False
+
+    if not _turnstile_token_ok(sb):
+        print("❌ Turnstile token 为空，拒绝提交登录")
+        sb.save_screenshot("login_no_turnstile_token.png")
+        return False
 
     print("🖱️ 敲击回车提交表单...")
     sb.press_keys('input[name="password"]', '\n')
@@ -798,17 +862,22 @@ def login(sb, email, password) -> bool:
     print("⏳ 等待登录跳转...")
     for _ in range(12):
         time.sleep(1)
-        cur_url = sb.get_current_url().split('?')[0].lower()
+        raw_url = sb.get_current_url() or ""
+        if "error=captcha" in raw_url.lower():
+            print(f"❌ 登录被 captcha 拒绝。(URL: {raw_url})")
+            sb.save_screenshot("login_captcha_rejected.png")
+            return False
+        cur_url = raw_url.split('?')[0].lower()
         page_title = sb.get_title() or ""
         if cur_url.startswith(f"{BASE_URL}/dashboard") or "Dashboard | KataBump" in page_title.lower():
             break
 
-    cur_url = sb.get_current_url().split('?')[0].lower()
+    cur_url = (sb.get_current_url() or "").split('?')[0].lower()
     page_title = sb.get_title() or ""
     if cur_url.startswith(f"{BASE_URL}/dashboard") or "Dashboard | KataBump" in page_title.lower():
         print(f"✅ 登录成功！(URL: {sb.get_current_url()}, Title: {page_title})")
         return True
-        
+
     print(f"❌ 登录失败，页面未跳转到账户页。(URL: {sb.get_current_url()}, Title: {page_title})")
     sb.save_screenshot("login_failed.png")
     return False
@@ -1364,7 +1433,11 @@ def _run_account(sb_kwargs, email, pwd):
             _install_turnstile_hook_cdp(sb)
             try:
                 sb.open("https://api.ip.sb/ip")
-                print(f"📍  当前出口IP: {sb.get_text('body')}")
+                ip_text = (sb.get_text("body") or "").strip()
+                print(f"📍  当前出口IP: {ip_text}")
+                if _egress_unusable(ip_text):
+                    print("❌ 出口探测失败（非有效 IP），换节点")
+                    return (RENEW_UNKNOWN, "出口探测失败", None)
             except Exception:
                 pass
 

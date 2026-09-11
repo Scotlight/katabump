@@ -6,7 +6,6 @@
   {"name": "Transtelco-MX", "server": "187.249.37.227", "port": 2024},
   {"name": "COMIFIBRA-MX", "server": "189.51.168.167", "port": 999},
   {"name": "Velico-HN", "server": "200.115.189.145", "port": 9096},
-  {"name": "Alestra-MX", "server": "148.244.144.194", "port": 8097},
   {"name": "Airtime-DO", "server": "181.232.190.121", "port": 999},
   {"name": "Dstny-BE", "server": "87.237.15.239", "port": 7080}
 ]
