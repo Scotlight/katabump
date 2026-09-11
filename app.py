@@ -1543,7 +1543,7 @@ def main():
     except ValueError:
         max_attempts = 0
     if max_attempts <= 0:
-        max_attempts = min(5, pool_n) if pool_n else 3
+        max_attempts = min(5, pool_n) if pool_n else 2
 
     # ------------------------------------------------------------------
     # 告警决策表（用户拍板：只有真问题才告警；能跑但暂时续不上/健康冷却期不吵）。

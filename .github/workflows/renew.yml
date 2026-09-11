@@ -38,7 +38,7 @@ jobs:
     - name: Start Proxy (sing-box)
       env:
         PROXY_URL: ${{ secrets.PROXY_URL }}
-        PIN_NODE: "1"
+        PROXY_CHAIN_URL: ${{ secrets.PROXY_CHAIN_URL }}
       run: |
         if [ -z "$PROXY_URL" ]; then
           echo "PROXY_URL not set, skipping sing-box setup."
@@ -54,13 +54,8 @@ jobs:
         python proxy_handler.py
         echo "Starting sing-box..."
         nohup ./sing-box run -c config.json > singbox.log 2>&1 &
-        # urltest group needs time to probe all pool nodes before first use
-        for i in $(seq 1 12); do
-          sleep 2
-          if [ "$i" -eq 12 ]; then
-            echo "waited 24s for urltest to settle"
-          fi
-        done
+        # 二跳/单节点无需等 urltest；给 inbound 起来即可
+        sleep 3
         echo "--- singbox.log ---"
         cat singbox.log || true
         echo "--- health check ---"
@@ -89,6 +84,7 @@ jobs:
       env:
         USERS_JSON: ${{ secrets.USERS_JSON }}
         PROXY_URL: ${{ secrets.PROXY_URL }}
+        PROXY_CHAIN_URL: ${{ secrets.PROXY_CHAIN_URL }}
         PROXY_SERVER: http://127.0.0.1:8080
         IS_PROXY: "true"
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}

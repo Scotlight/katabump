@@ -210,7 +210,7 @@ ok(_eu("This site can’t be reached api.ip.sb took too long to respond. ERR_TIM
 
 print("\n✅ 出口探测 `_egress_unusable` 通过 (8 项)")
 
-# ---- PIN_NODE 钉死出口（根因 09-11：urltest 反复抽 RST 节点）----
+# ---- PIN_NODE / PROXY_CHAIN_URL（根因 09-11：住宅池全挂，ZooProxy 经 AnyTLS 二跳）----
 import os as _os
 ph_spec = importlib.util.spec_from_file_location("proxy_handler", ROOT / "proxy_handler.py")
 ph = importlib.util.module_from_spec(ph_spec)
@@ -219,14 +219,19 @@ ph_spec.loader.exec_module(ph)
 _orig_cwd = _os.getcwd()
 _tmpdir = ROOT / ".pin-test-tmp"
 _tmpdir.mkdir(exist_ok=True)
+_sample_pool = [
+    {"name": "Frontier-US-1", "server": "104.251.93.55", "port": 16062},
+    {"name": "Telmex-CO", "server": "200.118.71.12", "port": 8080},
+]
 try:
     _os.chdir(_tmpdir)
+    (_tmpdir / "sample-pool.json").write_text(json.dumps(_sample_pool))
     _os.environ["PROXY_URL"] = "http://example.invalid:8080"
-    _os.environ["POOL_FILE"] = str(ROOT / "pool.json")
+    _os.environ["POOL_FILE"] = str(_tmpdir / "sample-pool.json")
+    _os.environ.pop("PROXY_CHAIN_URL", None)
     _os.environ["PIN_NODE"] = "2"
     ph.main()
     cfg = json.loads((_tmpdir / "config.json").read_text())
-    tags = [o.get("tag") for o in cfg["outbounds"]]
     proxy_ob = next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")
     ok("urltest" not in [o.get("type") for o in cfg["outbounds"]], "PIN_NODE=2 无 urltest")
     ok(proxy_ob.get("server") == "200.118.71.12" and proxy_ob.get("server_port") == 8080,
@@ -242,14 +247,26 @@ try:
     cfgp = json.loads((_tmpdir / "config.json").read_text())
     types = [o.get("type") for o in cfgp["outbounds"]]
     ok("urltest" in types, "无 PIN_NODE → urltest 池")
+    _os.environ.pop("PIN_NODE", None)
+    _os.environ.pop("POOL_FILE", None)
+    _os.environ["PROXY_URL"] = "anytls://secret@vps.example:60629?sni=vps.example&fp=chrome&insecure=1"
+    _os.environ["PROXY_CHAIN_URL"] = "http://user:pass@as.zooproxy.com:5000"
+    ph.main()
+    cfgc = json.loads((_tmpdir / "config.json").read_text())
+    tags = {o.get("tag"): o for o in cfgc["outbounds"]}
+    ok(tags["dialer"]["type"] == "anytls" and tags["dialer"]["server"] == "vps.example",
+       "chain dialer = anytls vps")
+    ok(tags["proxy"]["type"] == "http" and tags["proxy"].get("detour") == "dialer"
+       and tags["proxy"]["server"] == "as.zooproxy.com",
+       "chain proxy = ZooProxy HTTP detour dialer")
+    ok("urltest" not in [o.get("type") for o in cfgc["outbounds"]], "chain 模式无 urltest")
 finally:
     _os.chdir(_orig_cwd)
     for p in _tmpdir.glob("*"):
         p.unlink()
     _tmpdir.rmdir()
-    _os.environ.pop("PIN_NODE", None)
-    _os.environ.pop("POOL_FILE", None)
-    _os.environ.pop("PROXY_URL", None)
+    for k in ("PIN_NODE", "POOL_FILE", "PROXY_URL", "PROXY_CHAIN_URL"):
+        _os.environ.pop(k, None)
 
-print("\n✅ PIN_NODE 钉死出口通过 (5 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 5 = 65/65)")
+print("\n✅ PIN_NODE / PROXY_CHAIN_URL 通过 (8 项)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 8 = 68/68)")

@@ -365,6 +365,32 @@ def _build_pool_outbounds(base_out, pool_nodes):
     return outbounds
 
 
+def _parse_proxy_url(proxy_url):
+    scheme = proxy_url.split("://")[0].lower()
+    if scheme == "vmess":
+        return scheme, parse_vmess(proxy_url)
+    parsed = urlparse(proxy_url)
+    params = parse_qs(parsed.query)
+    if scheme == "socks5":
+        outbound = parse_socks5(parsed)
+    elif scheme in ("http", "https"):
+        outbound = parse_http(parsed)
+    elif scheme == "vless":
+        outbound = parse_vless(parsed, params)
+    elif scheme in ("hy2", "hysteria2"):
+        outbound = parse_hysteria2(parsed, params)
+    elif scheme == "trojan":
+        outbound = parse_trojan(parsed, params)
+    elif scheme == "anytls":
+        outbound = parse_anytls(parsed, params)
+    elif scheme == "tuic":
+        outbound = parse_tuic(parsed, params)
+    else:
+        print(f"Unsupported protocol: {scheme}")
+        sys.exit(1)
+    return scheme, outbound
+
+
 def main():
     proxy_url = os.environ.get("PROXY_URL", "").strip()
     if not proxy_url:
@@ -373,37 +399,22 @@ def main():
 
     scheme = proxy_url.split("://")[0].lower()
     print(f"Parsing proxy URI ({scheme}://***)")
+    scheme, outbound = _parse_proxy_url(proxy_url)
 
-    if scheme == "vmess":
-        outbound = parse_vmess(proxy_url)
-    else:
-        parsed = urlparse(proxy_url)
-        params = parse_qs(parsed.query)
-
-        if scheme == "socks5":
-            outbound = parse_socks5(parsed)
-        elif scheme in ("http", "https"):
-            outbound = parse_http(parsed)
-        elif scheme == "vless":
-            outbound = parse_vless(parsed, params)
-        elif scheme in ("hy2", "hysteria2"):
-            outbound = parse_hysteria2(parsed, params)
-        elif scheme == "trojan":
-            outbound = parse_trojan(parsed, params)
-        elif scheme == "anytls":
-            outbound = parse_anytls(parsed, params)
-        elif scheme == "tuic":
-            outbound = parse_tuic(parsed, params)
-        else:
-            print(f"Unsupported protocol: {scheme}")
-            sys.exit(1)
-
-    # 若 base proxy 有 pool.json，展开成多节点 + urltest 组（自动挑可达/最快节点）。
-    # 适用于 anytls，以及住宅代理 http/socks（residential pool，避免单点挂）。
-    # PIN_NODE=N（1-based）：钉死第 N 只，不走 urltest。续期重试时按序换出口，避免
-    # 重启后 urltest 再次选中同一只 RST/超时节点（09-11 实锤）。
+    # PROXY_CHAIN_URL：出口再套一层 HTTP/SOCKS（ZooProxy 经 AnyTLS 二跳）。
+    # Clash 订阅里 ZooProxy-HK 的 dialer-proxy=AnyTLS-googlevps，直连 as.zooproxy.com 会超时。
+    chain_url = os.environ.get("PROXY_CHAIN_URL", "").strip()
     outbounds = [outbound, {"type": "direct", "tag": "direct"}]
-    if scheme in ("anytls", "http", "https", "socks5", "socks", "https"):
+    if chain_url:
+        chain_scheme, chain_ob = _parse_proxy_url(chain_url)
+        outbound["tag"] = "dialer"
+        chain_ob["tag"] = "proxy"
+        chain_ob["detour"] = "dialer"
+        outbounds = [outbound, chain_ob, {"type": "direct", "tag": "direct"}]
+        print(f"  Chain mode: {scheme} -> {chain_scheme}://{chain_ob.get('server')}:{chain_ob.get('server_port')}")
+    elif scheme in ("anytls", "http", "https", "socks5", "socks"):
+        # 无二跳时才展开 pool.json。适用于 anytls / 住宅 http。
+        # PIN_NODE=N（1-based）：钉死第 N 只，不走 urltest。
         pool = _load_pool()
         if pool:
             pin_raw = (os.environ.get("PIN_NODE") or "").strip()
@@ -415,7 +426,6 @@ def main():
                     pin = None
             if pin is not None and 1 <= pin <= len(pool):
                 node_obs = _build_pool_outbounds(outbound, [pool[pin - 1]])
-                # _build_pool_outbounds 仍会加 urltest；单节点时把该节点直接标成 proxy
                 pinned = [ob for ob in node_obs if ob.get("tag") == "node-1"]
                 if pinned:
                     pinned[0]["tag"] = "proxy"
