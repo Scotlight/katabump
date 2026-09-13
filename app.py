@@ -1414,7 +1414,13 @@ def _submit_renew(sb):
                     }
                 }
                 var form = m.querySelector('form[action*="renew"]');
-                if (form) form.submit();
+                if (form) {
+                    if (typeof form.requestSubmit === 'function') {
+                        form.requestSubmit();
+                    } else {
+                        form.submit();
+                    }
+                }
             })()
         """)
     time.sleep(3)
