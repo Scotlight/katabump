@@ -315,7 +315,7 @@ _RENEW_NET_HOOK_JS = """(function(){
             if (typeof body === 'string') s = body;
             else if (body && typeof body.toString === 'function') s = String(body);
         } catch (e) {}
-        window.__renewNet.hasAltcha = /altcha=eyJ/.test(s) || /name="altcha"/.test(s) || /"altcha"/.test(s);
+        window.__renewNet.hasAltcha = /altcha=/.test(s) || /name="altcha"/.test(s) || /"altcha"/.test(s) || /{"algorithm"/.test(s);
     }
     var origFetch = window.fetch;
     if (origFetch) {
@@ -351,9 +351,10 @@ _RENEW_NET_HOOK_JS = """(function(){
         try {
             var fd = new FormData(f);
             var a = fd.get('altcha') || fd.get('altcha-payload') || fd.get('altcha_payload');
-            has = !!(a && String(a).indexOf('eyJ') === 0);
+            var s = a ? String(a).trim() : '';
+            has = !!(s && (s.indexOf('eyJ') === 0 || s.charAt(0) === '{') && s.length > 20);
         } catch (e) {}
-        note(action, 0, has ? 'altcha=eyJ' : '');
+        note(action, 0, has ? 'altcha=payload' : '');
     }, true);
     return 'hooked';
 })()
@@ -1238,6 +1239,51 @@ def _solve_altcha(sb) -> bool:
         print("✅ ALTCHA 已自动通过（solved）")
         return True
 
+    # 策略 0 [根因 2026-09]: 主动触发 <altcha-widget>.verify()
+    # Katabump 前端将 widget 包裹在 .altcha-hidden 中（0 宽高隐藏），且配置 auto="onsubmit"。
+    # 导致物理点击与原生 checkbox 点击因尺寸 0 或事件冒泡拦截无法触发 PoW 计算。
+    # <altcha-widget> 官方 Web Component 提供了标准公开方法 .verify()，调用后会立即
+    # 启动 Web Worker 进行 SHA-256 碰撞搜索（通常 700ms~2500ms 即可完成算题），
+    # 并自动填充带有 number 的 solution JSON 到 input[name="altcha"]。
+    print("  ⚡ [策略 0] 尝试调用 <altcha-widget>.verify() 启动 PoW 计算...")
+    try:
+        trig = sb.execute_script("""(function(){
+            var m = document.querySelector('div.modal.show') || document;
+            var w = m.querySelector('altcha-widget');
+            if (!w) return {found: false, reason: 'no_altcha_widget'};
+            if (typeof w.verify === 'function') {
+                try {
+                    w.verify();
+                    return {found: true, method: 'verify()', success: true};
+                } catch(e) {
+                    return {found: true, method: 'verify()', success: false, error: String(e)};
+                }
+            }
+            // 若无 direct verify 方法，尝试模拟 form submit 让 altcha-progress.js 拦截启动
+            var form = w.closest('form');
+            if (form) {
+                var btn = form.querySelector('button[type="submit"]');
+                if (btn) {
+                    btn.click();
+                    return {found: true, method: 'submit_btn_click', success: true};
+                }
+            }
+            return {found: true, method: 'none', success: false};
+        })()""")
+        print(f"  ℹ️ AltCHA verify 触发结果: {trig}")
+    except Exception as e:
+        print(f"  ⚠️ 执行 AltCHA verify JS 失败: {e}")
+
+    # 等待 verify() 计算完成（SHA-256 碰撞通常 1~4 秒，最多等待 15 秒）
+    for sec in range(1, 16):
+        time.sleep(1)
+        kind = _altcha_token_kind(sb)
+        if kind in ("solved-jwt", "solved-json"):
+            print(f"✅ ALTCHA 验证通过（verify() 触发成功，耗时 ~{sec}s，{kind}）")
+            return True
+        if sec % 4 == 0:
+            print(f"  ⏳ 等待 ALTCHA 算题中... ({sec}s/15s，当前: {kind})")
+
     def _altcha_coords():
         for js, label in (
             (_ALTCHA_CHECKPOINT_JS, "checkbox"),
@@ -1311,11 +1357,14 @@ def _solve_altcha(sb) -> bool:
         except Exception:
             pass
 
-        # 策略 3: JS 触发复选框真实 click 事件（带 bubbles，让 AltCHA widget 收）
+        # 策略 3: JS 触发复选框真实 click 事件，并再次尝试 w.verify()
         sb.execute_script("""
             (function(){
-                var modal = document.querySelector('div.modal.show');
-                if (!modal) return;
+                var modal = document.querySelector('div.modal.show') || document;
+                var w = modal.querySelector('altcha-widget');
+                if (w && typeof w.verify === 'function') {
+                    try { w.verify(); } catch(e) {}
+                }
                 var cbs = modal.querySelectorAll('input[id^="altcha_checkbox"], input[type="checkbox"]');
                 for (var k = 0; k < cbs.length; k++) {
                     if (!cbs[k].disabled) {
@@ -1356,11 +1405,16 @@ def _submit_renew(sb):
     except Exception:
         sb.execute_script("""
             (function(){
-                var m = document.querySelector('div.modal.show');
-                if (!m) return;
+                var m = document.querySelector('div.modal.show') || document;
                 var bs = m.querySelectorAll('button');
-                for (var i = 0; i < bs.length; i++)
-                    if (/renew/i.test(bs[i].textContent)) bs[i].click();
+                for (var i = 0; i < bs.length; i++) {
+                    if (/renew/i.test(bs[i].textContent)) {
+                        bs[i].click();
+                        return;
+                    }
+                }
+                var form = m.querySelector('form[action*="renew"]');
+                if (form) form.submit();
             })()
         """)
     time.sleep(3)
@@ -1689,7 +1743,7 @@ def renew_server(sb):
         elif http_st and int(http_st) >= 400:
             detail = (detail or "") + f" | Renew HTTP {http_st}"
         elif not has_altcha:
-            detail = (detail or "") + " | POST 未见 altcha=eyJ"
+            detail = (detail or "") + " | POST 未见 altcha payload"
 
     # [根因 09-08 恢复] suspended 但面板提示 “you can still renew it”：
     # 免费档到期被 suspend 后仍可续期拉回。只报红不动手 = 每次 run 都原地踏步，

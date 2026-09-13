@@ -227,9 +227,12 @@ ok(_ap(_jwt({"algorithm": "SHA-256", "challenge": "abc"})) is False, "challenge 
 ok(_ap(_jwt({"algorithm": "SHA-256", "number": 42, "signature": "x"})) is True, "solved JWT（含 number）→ 可提交")
 ok(_ap('{"algorithm":"SHA-256","challenge":"abc","signature":"x"}') is False, "无 number 的 JSON → 不可提交")
 ok(_ap('{"algorithm":"SHA-256","challenge":"abc","number":7,"signature":"x"}') is True, "solved JSON → 可提交")
+real_altcha_solution = '{"algorithm":"SHA-256","challenge":"eede03e8c2947275785619c09e828574ce1f9062e1eabbe56a7307c6ff5e3ce","number":465836,"salt":"fbc22922aeffb5fa5e3b3e7d?expires=1789271408","signature":"6ece80e4cb5bb14003879b4c6ca22c5190e799f47e4ff5c8874daa14b3590adf","took":712}'
+ok(_ak(real_altcha_solution) == "solved-json", "真实 Katabump AltCHA payload → solved-json")
+ok(_ap(real_altcha_solution) is True, "真实 Katabump AltCHA payload → 可提交")
 ok(_ap("not-a-token-but-longer-than-twenty-chars") is False, "长但非 JWT/JSON → 不可提交")
 
-print("\n✅ ALTCHA payload 闸门通过 (9 项)")
+print("\n✅ ALTCHA payload 闸门通过 (11 项)")
 
 # ---- PIN_NODE / PROXY_CHAIN_URL（根因 09-11：住宅池全挂，ZooProxy 经 AnyTLS 二跳）----
 import os as _os
@@ -290,4 +293,4 @@ finally:
         _os.environ.pop(k, None)
 
 print("\n✅ PIN_NODE / PROXY_CHAIN_URL 通过 (8 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 9 + 8 = 77/77)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 11 + 8 = 79/79)")
