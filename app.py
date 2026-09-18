@@ -1046,23 +1046,32 @@ def _altcha_jwt_claims(value: str):
 
 
 def _altcha_claims(value: str):
-    """JWT 或 JSON 的 claims。不把原值打进日志。"""
+    """JWT / Base64-JSON / Raw JSON 的 claims。不把原值打进日志。"""
     v = (value or "").strip()
     if not v:
         return None
-    if v.startswith("eyJ") and "." in v:
-        return _altcha_jwt_claims(v)
     if v.startswith("{"):
         try:
             data = json.loads(v)
             return data if isinstance(data, dict) else None
         except Exception:
             return None
+    if "." in v:
+        return _altcha_jwt_claims(v)
+    # 纯 base64 编码的 JSON (如 AltCHA 官方标准 base64 solution)
+    if v.startswith("eyJ"):
+        pad = "=" * ((4 - len(v) % 4) % 4)
+        try:
+            raw = base64.urlsafe_b64decode(v + pad)
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            pass
     return None
 
 
 def _altcha_payload_kind(value: str) -> str:
-    """empty / challenge-jwt / solved-jwt / challenge-json / solved-json / other。"""
+    """empty / challenge-jwt / solved-jwt / challenge-json / solved-json / challenge-b64 / solved-b64 / other。"""
     v = (value or "").strip()
     if not v:
         return "empty"
@@ -1072,17 +1081,19 @@ def _altcha_payload_kind(value: str) -> str:
         claims.get("number") is not None or claims.get("solution") is not None
     ):
         solved = True
-    if v.startswith("eyJ"):
+    if "." in v:
         return "solved-jwt" if solved else "challenge-jwt"
     if v.startswith("{"):
         return "solved-json" if solved else "challenge-json"
+    if v.startswith("eyJ"):
+        return "solved-b64" if solved else "challenge-b64"
     return "other"
 
 
 def _altcha_payload_ok(value: str) -> bool:
-    """可提交的 AltCHA solution：JWT/JSON 且带 PoW number（challenge JWT 不算）。"""
+    """可提交的 AltCHA solution：JWT/JSON/Base64 且带 PoW number（challenge JWT 不算）。"""
     kind = _altcha_payload_kind(value)
-    return kind in ("solved-jwt", "solved-json")
+    return kind in ("solved-jwt", "solved-json", "solved-b64")
 
 
 def _altcha_token_ok(sb) -> bool:
@@ -1097,6 +1108,37 @@ def _altcha_token_kind(sb) -> str:
         return _altcha_payload_kind(sb.execute_script(_ALTCHA_TOKEN_JS) or "")
     except Exception:
         return "empty"
+
+def _solve_altcha_pow(challenge_data: dict):
+    """本地极速求解 AltCHA SHA-256 PoW（通常 50~200ms）。"""
+    salt = challenge_data.get("salt")
+    target = challenge_data.get("challenge")
+    max_num = challenge_data.get("maxnumber", 1000000)
+    if not salt or not target:
+        return None
+    import hashlib
+    t0 = time.time()
+    found = None
+    for n in range(max_num + 1):
+        val = f"{salt}{n}".encode("utf-8")
+        if hashlib.sha256(val).hexdigest() == target:
+            found = n
+            break
+    took = int((time.time() - t0) * 1000)
+    if found is None:
+        return None
+    sol_dict = {
+        "algorithm": challenge_data.get("algorithm", "SHA-256"),
+        "challenge": challenge_data.get("challenge"),
+        "number": found,
+        "salt": challenge_data.get("salt"),
+        "signature": challenge_data.get("signature"),
+        "took": took
+    }
+    raw_json = json.dumps(sol_dict)
+    b64_json = base64.b64encode(raw_json.encode("utf-8")).decode("utf-8")
+    return {"json": raw_json, "b64": b64_json, "number": found, "took": took}
+
 
 
 def _read_alert(sb):
@@ -1235,8 +1277,8 @@ def _solve_altcha(sb) -> bool:
 
     kind0 = _altcha_token_kind(sb)
     print(f"  ℹ️ 当前 AltCHA payload: {kind0}")
-    if kind0 in ("solved-jwt", "solved-json"):
-        print("✅ ALTCHA 已自动通过（solved）")
+    if _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or ""):
+        print(f"✅ ALTCHA 已自动通过（{kind0}）")
         return True
 
     # 策略 0 [根因 2026-09]: 主动触发 <altcha-widget>.verify()
@@ -1278,11 +1320,82 @@ def _solve_altcha(sb) -> bool:
     for sec in range(1, 16):
         time.sleep(1)
         kind = _altcha_token_kind(sb)
-        if kind in ("solved-jwt", "solved-json"):
+        if _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or ""):
             print(f"✅ ALTCHA 验证通过（verify() 触发成功，耗时 ~{sec}s，{kind}）")
             return True
         if sec % 4 == 0:
             print(f"  ⏳ 等待 ALTCHA 算题中... ({sec}s/15s，当前: {kind})")
+
+    # 策略 0.5 [保险兜底 2026-09]: 直接提取 challenge 或请求 challengeurl 独立算题并注入 input
+    print("  ⚡ [策略 0.5] 主动提取/请求 AltCHA challenge 进行本地快速 PoW 求解...")
+    try:
+        challenge_info = sb.execute_script("""(function(){
+            var m = document.querySelector('div.modal.show') || document;
+            var w = m.querySelector('altcha-widget');
+            var chUrl = w ? w.getAttribute('challengeurl') : null;
+            var chJson = w ? w.getAttribute('challengejson') : null;
+            return {
+                url: chUrl || 'https://altcha.katabump.fr/challenge',
+                json: chJson
+            };
+        })()""")
+        chal_data = None
+        if challenge_info and challenge_info.get("json"):
+            try:
+                chal_data = json.loads(challenge_info["json"])
+            except Exception:
+                pass
+        if not chal_data and challenge_info and challenge_info.get("url"):
+            try:
+                # 优先在浏览器内 fetch 获取（继承 session / cookie / proxy）
+                fetched = sb.execute_script("""(async function(u){
+                    try {
+                        var res = await fetch(u, {credentials: 'omit'});
+                        return await res.json();
+                    } catch(e) {
+                        return {error: String(e)};
+                    }
+                })(arguments[0]);""", challenge_info["url"])
+                if fetched and isinstance(fetched, dict) and "challenge" in fetched:
+                    chal_data = fetched
+            except Exception as e:
+                print(f"  ⚠️ 浏览器内 fetch challenge 失败: {e}")
+
+        if chal_data and "challenge" in chal_data:
+            print(f"  ℹ️ 成功获取 challenge (salt: {chal_data.get('salt')[:16]}...)")
+            sol = _solve_altcha_pow(chal_data)
+            if sol:
+                print(f"  ⚡ 本地 PoW 算题成功: number={sol['number']} 耗时={sol['took']}ms，正在回填页面 input...")
+                res_inject = sb.execute_script("""(function(solB64, solJson){
+                    var m = document.querySelector('div.modal.show') || document;
+                    var w = m.querySelector('altcha-widget');
+                    var nodes = m.querySelectorAll('input[name="altcha"], input[name="altcha-payload"], input[name="altcha_payload"]');
+                    var filled = 0;
+                    for (var i = 0; i < nodes.length; i++) {
+                        nodes[i].value = solB64;
+                        nodes[i].dispatchEvent(new Event('input', {bubbles: true}));
+                        nodes[i].dispatchEvent(new Event('change', {bubbles: true}));
+                        filled++;
+                    }
+                    if (w) {
+                        try {
+                            w.value = solB64;
+                            w.setAttribute('data-state', 'verified');
+                            w.setAttribute('state', 'verified');
+                            w.dispatchEvent(new CustomEvent('statechange', {detail: {state: 'verified'}}));
+                            w.dispatchEvent(new CustomEvent('verified', {detail: {payload: solB64}}));
+                        } catch(e) {}
+                    }
+                    return {filled: filled, hasWidget: !!w};
+                })(arguments[0], arguments[1]);""", sol["b64"], sol["json"])
+                print(f"  ℹ️ 回填结果: {res_inject}")
+                time.sleep(1)
+                kind_after = _altcha_token_kind(sb)
+                if _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or ""):
+                    print(f"✅ ALTCHA 验证通过（策略 0.5 本地算题注入成功，{kind_after}）")
+                    return True
+    except Exception as e:
+        print(f"  ⚠️ 策略 0.5 失败: {e}")
 
     def _altcha_coords():
         for js, label in (
@@ -1322,7 +1435,7 @@ def _solve_altcha(sb) -> bool:
     # 最多尝试 3 轮
     for attempt in range(3):
         kind = _altcha_token_kind(sb)
-        if kind in ("solved-jwt", "solved-json"):
+        if _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or ""):
             print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，{kind}）")
             return True
         if kind in ("challenge-jwt", "challenge-json"):
@@ -1379,7 +1492,7 @@ def _solve_altcha(sb) -> bool:
         for _ in range(18):
             time.sleep(1)
             kind = _altcha_token_kind(sb)
-            if kind in ("solved-jwt", "solved-json"):
+            if _altcha_payload_ok(sb.execute_script(_ALTCHA_TOKEN_JS) or ""):
                 print(f"✅ ALTCHA 验证通过（第 {attempt + 1} 轮，{kind}）")
                 return True
 
