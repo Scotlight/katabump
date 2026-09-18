@@ -1264,6 +1264,10 @@ def _open_renew_modal(sb) -> bool:
             sb.execute_script(_RENEW_NET_HOOK_JS)
         except Exception:
             pass
+        try:
+            sb.save_screenshot("renew_modal_opened.png")
+        except Exception:
+            pass
         return True
     except Exception:
         print("⚠️ 模态框未弹出")
@@ -1512,30 +1516,58 @@ def _submit_renew(sb):
         pass
     kind = _altcha_token_kind(sb)
     print(f"  ℹ️ 提交前 AltCHA payload: {kind}")
+    
+    # 诊断模态框内的表单与按钮
     try:
-        submit = sb.find_element('div.modal.show button.btn-primary', timeout=5)
+        diag = sb.execute_script("""(function(){
+            var m = document.querySelector('div.modal.show') || document;
+            var forms = Array.from(m.querySelectorAll('form')).map(f => ({
+                action: f.action || f.getAttribute('action'),
+                method: f.method,
+                id: f.id,
+                inputs: Array.from(f.querySelectorAll('input')).map(i => ({name: i.name, type: i.type, valLen: (i.value||'').length}))
+            }));
+            var btns = Array.from(m.querySelectorAll('button')).map(b => ({
+                type: b.type,
+                cls: b.className,
+                text: (b.textContent || '').trim().slice(0, 30),
+                disabled: b.disabled
+            }));
+            return {forms: forms, btns: btns};
+        })()""")
+        print(f"  ℹ️ Renew 模态框 DOM 诊断: {diag}")
+    except Exception as e:
+        print(f"  ⚠️ 模态框诊断异常: {e}")
+
+    submitted = False
+    try:
+        submit = sb.find_element('div.modal.show form button[type="submit"], div.modal.show form button.btn-primary, div.modal.show button.btn-primary', timeout=5)
         submit.click()
+        submitted = True
+        print("  🖱️ 已通过 SeleniumBase 点击提交按钮")
     except Exception:
-        sb.execute_script("""
-            (function(){
-                var m = document.querySelector('div.modal.show') || document;
-                var bs = m.querySelectorAll('button');
-                for (var i = 0; i < bs.length; i++) {
-                    if (/renew/i.test(bs[i].textContent)) {
-                        bs[i].click();
-                        return;
-                    }
+        pass
+
+    if not submitted:
+        sb.execute_script("""(function(){
+            var m = document.querySelector('div.modal.show') || document;
+            var form = m.querySelector('form');
+            if (form) {
+                var btn = form.querySelector('button[type="submit"]') || form.querySelector('button.btn-primary') || form.querySelector('button');
+                if (btn) {
+                    btn.click();
+                    return 'btn_clicked';
                 }
-                var form = m.querySelector('form[action*="renew"]');
-                if (form) {
-                    if (typeof form.requestSubmit === 'function') {
-                        form.requestSubmit();
-                    } else {
-                        form.submit();
-                    }
+                if (typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                    return 'requestSubmit';
+                } else {
+                    form.submit();
+                    return 'submit';
                 }
-            })()
-        """)
+            }
+            return 'no_form';
+        })()""")
     time.sleep(3)
     try:
         net = sb.execute_script(_RENEW_NET_READ_JS) or {}
