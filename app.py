@@ -1763,7 +1763,7 @@ def _classify_renew(alert_text, page_text):
         r"renew[a-z]*\s+(?:success[a-z]*|extend[a-z]*|complete[a-z]*|done\b|now\b)"
         r"|renew[a-z]{0,3}\s+until\s+[^\n]{0,40}"
         r"|renewal\s+(?:success[a-z]*|complete[a-z]*|extended?\b)"
-        r"|(?:your\s+)?server\s+has\s+been\s+renew[a-z]*",
+        r"|(?:your\s+)?(?:server|service)\s+has\s+been\s+renew[a-z]*",
         re.IGNORECASE)
     block = re.compile(r"suspend|can't renew|cannot renew|unable to renew")
     sp = success_pat.search(low)
