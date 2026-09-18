@@ -73,6 +73,8 @@ print("✅ 合并 `_merge_result` 测试通过 (9 项)")
 
 ok(_classify_renew("", "your server has been renewed successfully. new expiry 2026-09-16")[0] == RENEW_PASS,
    "真续期成功 → ok")
+ok(_classify_renew("Your service has been renewed.", SRV_WARN)[0] == RENEW_PASS,
+   "KataBump 面板实测提示: Your service has been renewed → pass")
 ok(_classify_renew(SRV_WARN, "")[0] == RENEW_UNCONFIRMED,
    "仅 server-type 警告、无成功确认 → unconfirmed(红) [关键回归: 09-02 事故]")
 ok(_classify_renew("", "You can't renew your server yet. as of 10 September 2026 (in 7 day(s)).")[0] == RENEW_COOLDOWN,
