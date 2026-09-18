@@ -43,6 +43,22 @@ def load_accounts():
 ACCOUNTS = load_accounts()
 CURRENT_EMAIL = ""  # 当前正在处理的账号，供 send_tg_message 脱敏
 
+
+def _mask_email(email):
+    """Mask account identifiers before writing them to public Actions logs."""
+    email = (email or "").strip()
+    if "@" not in email:
+        return (email[:2] + "****") if email else "未知"
+    name, domain = email.split("@", 1)
+    if len(name) <= 2:
+        masked_name = name[:1] + "***"
+    elif len(name) <= 4:
+        masked_name = name[:1] + "***" + name[-1:]
+    else:
+        masked_name = name[:2] + "****" + name[-2:]
+    return f"{masked_name}@{domain}"
+
+
 #  Telegram 推送模块
 def send_tg_message(status_icon, status_text, time_left=""):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
@@ -53,16 +69,7 @@ def send_tg_message(status_icon, status_text, time_left=""):
     local_time = time.gmtime(time.time() + 8 * 3600)
     current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
 
-    # 邮箱脱敏：保留用户名前2位和后2位，中间用****代替
-    email = CURRENT_EMAIL
-    if '@' in email:
-        name, domain = email.split('@', 1)
-        if len(name) > 4:
-            masked_email = f"{name[:2]}****{name[-2:]}@{domain}"
-        else:
-            masked_email = f"{name}@{domain}"
-    else:
-        masked_email = (email[:2] + '****') if email else "未知"
+    masked_email = _mask_email(CURRENT_EMAIL)
 
     # time_left 实际承载面板 alert / 失败详情（历史参数名保留）
     detail = (time_left or "").strip()
@@ -1666,7 +1673,7 @@ def _save_state(email, expiry_iso):
         d[email] = expiry_iso
         with open(STATE_FILE, "w") as f:
             json.dump(d, f)
-        print(f"💾 已记录 {email} 新到期日: {expiry_iso}")
+        print(f"💾 已记录 {_mask_email(email)} 新到期日: {expiry_iso}")
     except Exception as e:
         print(f"⚠️ 状态写入失败（不影响续期）: {e}")
 
@@ -1984,10 +1991,10 @@ def _run_account(sb_kwargs, email, pwd):
             st = res.get("status", RENEW_UNKNOWN) if isinstance(res, dict) else RENEW_UNKNOWN
             detail = res.get("detail", "") if isinstance(res, dict) else ""
             rdays = res.get("remaining_days") if isinstance(res, dict) else None
-            print(f"ℹ️  账号 {email} 续期状态: {st}")
+            print(f"ℹ️  账号 {_mask_email(email)} 续期状态: {st}")
             return (st, detail, rdays)
     except Exception as e:
-        print(f"\n❌ 账号 {email} 处理异常: {e}")
+        print(f"\n❌ 账号 {_mask_email(email)} 处理异常: {e}")
         return (RENEW_UNKNOWN, f"处理异常: {e}", None)
 
 #  脚本执行入口 (可选代理)
@@ -2071,7 +2078,7 @@ def main():
         email = acc["email"]
         pwd   = acc["password"]
         print("\n" + "=" * 25)
-        print(f"  处理账号 {idx}/{len(ACCOUNTS)}: {email}")
+        print(f"  处理账号 {idx}/{len(ACCOUNTS)}: {_mask_email(email)}")
         print("=" * 25)
 
         acc_res = RENEW_UNKNOWN
@@ -2087,7 +2094,7 @@ def main():
             acc_res = RENEW_COOLDOWN
             acc_rdays = skipdays
             acc_detail = f"冷却期跳过（上次 expiry 距今约 {skipdays} 天，未到续期窗口）"
-            print(f"⏳ [根因] 账号 {email} 冷却期跳过：距上次 expiry 约 {skipdays} 天 > {MAX_CONFIRMED_ALERT_DAYS}，不点 Renew。")
+            print(f"⏳ [根因] 账号 {_mask_email(email)} 冷却期跳过：距上次 expiry 约 {skipdays} 天 > {MAX_CONFIRMED_ALERT_DAYS}，不点 Renew。")
         else:
             for attempt in range(1, max_attempts + 1):
                 print(f"  ── 节点尝试 {attempt}/{max_attempts} ──")
@@ -2120,20 +2127,20 @@ def main():
         icon, atext, should_alert = _alert_action(acc_res, acc_rdays)
         if acc_res == RENEW_PASS:
             renewed += 1
-            print(f"✅ 账号 {email} 续期成功")
+            print(f"✅ 账号 {_mask_email(email)} 续期成功")
             send_tg_message(icon, atext, acc_detail or "续期成功")
         elif should_alert:
             # 真·问题：suspended / 流程未跑通 / 临近到期未确认续上 → 红告警 + Actions 失败
             failed += 1
             extra = f"（剩 {acc_rdays} 天）" if acc_res == RENEW_UNCONFIRMED and acc_rdays is not None else ""
-            print(f"❌ 账号 {email} {atext}{extra}（{acc_res}）：{acc_detail or ''}")
-            send_tg_message(icon, atext, f"{email} {acc_res} | {acc_detail}")
+            print(f"❌ 账号 {_mask_email(email)} {atext}{extra}（{acc_res}）：{acc_detail or ''}")
+            send_tg_message(icon, atext, f"{_mask_email(email)} {acc_res} | {acc_detail}")
         else:
             # 健康冷却期 / 无天数 unconfirmed：用户当下处理不了（到期日未知/未到），
             # 且真死由 suspended 硬告警兜底 → 静默，仅记日志，不发 TG、不因 CI 失败。
             cooldown += 1
             extra = f"剩 {acc_rdays} 天" if acc_rdays is not None else "天数未知"
-            print(f"⏳ 账号 {email} 本次未触发告警（{acc_res}，{extra}）：{acc_detail or ''}")
+            print(f"⏳ 账号 {_mask_email(email)} 本次未触发告警（{acc_res}，{extra}）：{acc_detail or ''}")
 
     # 确保状态文件存在（即使冷却期未写入任何 expiry），供 actions/cache/save 有文件可存
     _ensure_state_file()

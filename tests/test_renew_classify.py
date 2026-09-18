@@ -44,6 +44,11 @@ def ok(cond, label):
     if not cond:
         sys.exit(1)
 
+ok(app._mask_email("exampleuser@example.com") == "ex****er@example.com",
+   "Actions 日志邮箱脱敏")
+ok("exampleuser" not in app._mask_email("exampleuser@example.com"),
+   "脱敏结果不保留完整账号名")
+
 SUSPEND_BODY = "Your server is suspended because you did not renew it in time. You can still renew it."
 
 # ---- 多节点结果合并 `_merge_result`（根因回归：09-04 实锤节点3 unknown 误覆盖冷却）----
@@ -303,4 +308,4 @@ finally:
         _os.environ.pop(k, None)
 
 print("\n✅ PIN_NODE / PROXY_CHAIN_URL 通过 (8 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 15 + 8 = 83/83)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 15 + 8 + 2 = 85/85)")
