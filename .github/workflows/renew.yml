@@ -11,10 +11,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
+
+    # [根因] 状态跨 run 持久化：当天 run 记录的 expiry，供后续冷却期 run 直接跳过 Renew。
+    # cache 键不可变 → restore 用前缀匹配最近一次，save 用 run_id 唯一键（旧条目自动 LRU 淘汰）。
+    - name: Restore renew-state cache
+      uses: actions/cache/restore@v4
+      with:
+        path: renew_state.json
+        key: renew-state-${{ github.run_id }}
+        restore-keys: |
+          renew-state-
 
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
@@ -28,6 +38,7 @@ jobs:
     - name: Start Proxy (sing-box)
       env:
         PROXY_URL: ${{ secrets.PROXY_URL }}
+        PROXY_CHAIN_URL: ${{ secrets.PROXY_CHAIN_URL }}
       run: |
         if [ -z "$PROXY_URL" ]; then
           echo "PROXY_URL not set, skipping sing-box setup."
@@ -43,13 +54,8 @@ jobs:
         python proxy_handler.py
         echo "Starting sing-box..."
         nohup ./sing-box run -c config.json > singbox.log 2>&1 &
-        # urltest group needs time to probe all pool nodes before first use
-        for i in $(seq 1 12); do
-          sleep 2
-          if [ "$i" -eq 12 ]; then
-            echo "waited 24s for urltest to settle"
-          fi
-        done
+        # 二跳/单节点无需等 urltest；给 inbound 起来即可
+        sleep 3
         echo "--- singbox.log ---"
         cat singbox.log || true
         echo "--- health check ---"
@@ -60,24 +66,25 @@ jobs:
         echo "✅ sing-box process alive"
         (command -v ss >/dev/null && ss -tlnp 2>/dev/null | grep 8080) || echo "(ss unavailable)"
         echo "--- proxy connectivity test ---"
-        if ! curl -s -m 30 -x http://127.0.0.1:8080 https://api.ip.sb/ip; then
-          echo ""
-          echo "❌ proxy connect FAILED — no reachable anytls node in pool"
-          echo "   The sing-box process is alive but every PROXY_URL/pool node timed out."
-          echo "   Could be cap on the airline nodes, the GH runner egress block, or a bad PROXY_URL."
-          echo "   Check the run's singbox.log artifact for which node the urltest picked."
-          exit 1
-        else
+        # icanhazip：api.ip.sb / gstatic 在部分出口会被 RST，不等于隧道没通。
+        if curl -sS -m 20 -x http://127.0.0.1:8080 https://ipv4.icanhazip.com; then
           echo ""
           echo "  <- proxy OK"
-          # show which node the urltest group selected (sing-box debug line)
-          grep -iE "urltest|selected|node-" singbox.log | tail -5 || true
+          grep -iE "urltest|selected|node-|ERROR" singbox.log | tail -8 || true
+        else
+          echo ""
+          echo "❌ proxy connect FAILED — dialer/chain unreachable from this runner"
+          echo "   The sing-box process is alive but PROXY_URL (and PROXY_CHAIN_URL if set) did not egress."
+          echo "--- singbox.log after fail ---"
+          cat singbox.log || true
+          exit 1
         fi
 
     - name: Run Renew Script
       env:
         USERS_JSON: ${{ secrets.USERS_JSON }}
         PROXY_URL: ${{ secrets.PROXY_URL }}
+        PROXY_CHAIN_URL: ${{ secrets.PROXY_CHAIN_URL }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: |
@@ -92,14 +99,22 @@ jobs:
         fi
         xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 app.py
 
+    # [根因] 把本次 run 更新后的 renew_state.json 存回（run_id 唯一键，供下次 restore）。
+    # always(): 即使续期失败也留续状态，避免重跑挖掉已续记记录。
+    - name: Save renew-state cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: renew_state.json
+        key: renew-state-${{ github.run_id }}
+
     - name: Upload Screenshots
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: screenshots
         path: |
           *.png
           screenshots/
           singbox.log
-          config.json
         if-no-files-found: ignore
