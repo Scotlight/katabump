@@ -232,7 +232,15 @@ ok(_ak(real_altcha_solution) == "solved-json", "真实 Katabump AltCHA payload �
 ok(_ap(real_altcha_solution) is True, "真实 Katabump AltCHA payload → 可提交")
 ok(_ap("not-a-token-but-longer-than-twenty-chars") is False, "长但非 JWT/JSON → 不可提交")
 
-print("\n✅ ALTCHA payload 闸门通过 (11 项)")
+
+_b64_sol = _b64.b64encode(real_altcha_solution.encode()).decode()
+ok(_ak(_b64_sol) == "solved-b64", "Base64 格式 AltCHA payload -> solved-b64")
+ok(_ap(_b64_sol) is True, "Base64 格式 AltCHA payload -> 可提交")
+_b64_chal = _b64.b64encode(json.dumps({"algorithm": "SHA-256", "challenge": "abc"}).encode()).decode()
+ok(_ak(_b64_chal) == "challenge-b64", "Base64 格式 AltCHA challenge -> challenge-b64")
+ok(_ap(_b64_chal) is False, "Base64 格式 AltCHA challenge -> 不可提交")
+
+print("\n✅ ALTCHA payload 闸门通过 (15 项)")
 
 # ---- PIN_NODE / PROXY_CHAIN_URL（根因 09-11：住宅池全挂，ZooProxy 经 AnyTLS 二跳）----
 import os as _os
@@ -293,4 +301,4 @@ finally:
         _os.environ.pop(k, None)
 
 print("\n✅ PIN_NODE / PROXY_CHAIN_URL 通过 (8 项)")
-print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 11 + 8 = 79/79)")
+print("\n✅✅ 全部测试通过 (15 + 10 + 6 + 12 + 9 + 8 + 15 + 8 = 83/83)")
