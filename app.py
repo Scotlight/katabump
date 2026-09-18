@@ -1539,6 +1539,35 @@ def _submit_renew(sb):
     except Exception as e:
         print(f"  ⚠️ 模态框诊断异常: {e}")
 
+    # 等待前端 altcha-progress.js 600ms 定时器完成并将按钮 disabled 状态解开（最多等 4 秒）
+    btn_ready = False
+    for _ in range(8):
+        try:
+            disabled = sb.execute_script("""(function(){
+                var m = document.querySelector('div.modal.show') || document;
+                var btn = m.querySelector('form button[type="submit"], form button.btn-primary, button.btn-primary');
+                return btn ? btn.disabled : true;
+            })()""")
+            if not disabled:
+                btn_ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    if btn_ready:
+        print("  ✅ 提交按钮已解锁 (disabled=False)")
+    else:
+        print("  ⚠️ 提交按钮超时仍处于 disabled，通过 JS 强行解除 disabled 状态...")
+        try:
+            sb.execute_script("""(function(){
+                var m = document.querySelector('div.modal.show') || document;
+                var btn = m.querySelector('form button[type="submit"], form button.btn-primary, button.btn-primary');
+                if (btn) btn.disabled = false;
+            })()""")
+        except Exception:
+            pass
+
     submitted = False
     try:
         submit = sb.find_element('div.modal.show form button[type="submit"], div.modal.show form button.btn-primary, div.modal.show button.btn-primary', timeout=5)
@@ -1549,12 +1578,13 @@ def _submit_renew(sb):
         pass
 
     if not submitted:
-        sb.execute_script("""(function(){
+        res = sb.execute_script("""(function(){
             var m = document.querySelector('div.modal.show') || document;
             var form = m.querySelector('form');
             if (form) {
                 var btn = form.querySelector('button[type="submit"]') || form.querySelector('button.btn-primary') || form.querySelector('button');
                 if (btn) {
+                    btn.disabled = false;
                     btn.click();
                     return 'btn_clicked';
                 }
@@ -1568,6 +1598,7 @@ def _submit_renew(sb):
             }
             return 'no_form';
         })()""")
+        print(f"  ℹ️ JS 表单提交触发结果: {res}")
     time.sleep(3)
     try:
         net = sb.execute_script(_RENEW_NET_READ_JS) or {}
